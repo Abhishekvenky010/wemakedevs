@@ -81,7 +81,13 @@ pub async fn generate_risk_report(
             row.try_get("graph_evidence_json").map_err(api_error)?;
 
         let graph_evidence = match graph_evidence_json {
-            Some(raw) => Some(serde_json::from_str::<serde_json::Value>(&raw).map_err(api_error)?),
+            Some(raw) => match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(value) => Some(value),
+                Err(error) => {
+                    eprintln!("Historical graph evidence is invalid JSON for case {id}: {error}");
+                    None
+                }
+            },
             None => None,
         };
 
@@ -124,7 +130,7 @@ pub async fn generate_risk_report(
     });
 
     // Let Groq choose and execute approved read-only graph tools.
-    let report = run_groq_agent(&state, &cycles, &memories).await?;
+    let report = run_groq_agent(&state, &cycles, &memories, &comparison).await?;
 
     let wallets: HashSet<String> = cycles
         .iter()
@@ -133,10 +139,10 @@ pub async fn generate_risk_report(
         .map(str::to_owned)
         .collect();
 
-    let wallets_flagged = wallets.len();
+    let unique_cycle_roots = wallets.len();
     let wallet_addresses: Vec<String> = wallets.into_iter().collect();
 
-    let finding = if wallets_flagged > 0 {
+    let finding = if unique_cycle_roots > 0 {
         "Circular-transfer pattern detected"
     } else {
         "No circular-transfer pattern detected"
@@ -190,7 +196,7 @@ pub async fn generate_risk_report(
 
     Ok(Json(serde_json::json!({
         "status": "success",
-        "wallets_flagged": wallets_flagged,
+        "wallets_flagged": unique_cycle_roots,
         "graph_evidence": cycles,
         "investigation_diff": comparison,
         "structured_report": structured_report,

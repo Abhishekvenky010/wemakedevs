@@ -1,4 +1,4 @@
-// Tool schemas and utility functions for Groq agent tool calls.use serde_json::{json, Value};
+// Tool schemas and utility functions for Groq agent tool calls.
 use crate::state::AppState;
 use serde_json::{Value, json};
 
@@ -137,5 +137,97 @@ pub async fn execute(state: &AppState, name: &str, raw_arguments: &str) -> Value
         }
 
         _ => unreachable!("Tool name was checked above"),
+    }
+}
+
+pub async fn execute_via_mcp(
+    client: &crate::agent::mcp_client::McpClient,
+    name: &str,
+    raw_arguments: &str,
+) -> Value {
+    if name != "trace_wallet" && name != "find_related_cases" {
+        return json!({
+            "status": "error",
+            "error": "Unknown tool. Only approved read-only tools are available."
+        });
+    }
+
+    let arguments = match serde_json::from_str::<Value>(raw_arguments) {
+        Ok(arguments) => arguments,
+        Err(_) => {
+            return json!({
+                "status": "error",
+                "error": "Tool arguments were not valid JSON."
+            });
+        }
+    };
+
+    let address = match validate_address(&arguments) {
+        Ok(address) => address,
+        Err(error) => {
+            return json!({
+                "status": "error",
+                "error": error
+            });
+        }
+    };
+
+    match client.call_tool(name, json!({ "address": address })).await {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("MCP tool call failed: {error}");
+            json!({
+                "status": "error",
+                "error": "MCP tool execution failed."
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn validate_tool_input(name: &str, raw_arguments: &str) -> Value {
+        if name != "trace_wallet" && name != "find_related_cases" {
+            return json!({
+                "status": "error",
+                "error": "Unknown tool. Only approved read-only tools are available."
+            });
+        }
+
+        let arguments = match serde_json::from_str::<Value>(raw_arguments) {
+            Ok(arguments) => arguments,
+            Err(_) => {
+                return json!({
+                    "status": "error",
+                    "error": "Tool arguments were not valid JSON."
+                });
+            }
+        };
+
+        match validate_address(&arguments) {
+            Ok(_) => json!({"status": "success"}),
+            Err(error) => json!({"status": "error", "error": error}),
+        }
+    }
+
+    #[test]
+    fn rejects_unapproved_tool_without_calling_mcp() {
+        let result = validate_tool_input("delete_wallet", r#"{"address":"demo_wallet_1"}"#);
+
+        assert_eq!(result["status"], "error");
+        assert_eq!(
+            result["error"],
+            "Unknown tool. Only approved read-only tools are available."
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_json_without_calling_mcp() {
+        let result = validate_tool_input("trace_wallet", "not-json");
+
+        assert_eq!(result["status"], "error");
+        assert_eq!(result["error"], "Tool arguments were not valid JSON.");
     }
 }

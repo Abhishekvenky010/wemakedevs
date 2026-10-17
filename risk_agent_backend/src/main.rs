@@ -1,7 +1,10 @@
+#![recursion_limit = "256"]
+
 mod agent;
 mod error;
 mod graph;
 mod handlers;
+mod mcp;
 mod state;
 
 use axum::{
@@ -25,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .try_into()
         .map_err(|e| format!("Invalid FalkorDB connection URL: {e}"))?;
 
-    println!("Connecting to FalkorDB Cloud...");
+    eprintln!("Connecting to FalkorDB Cloud...");
 
     let client = FalkorClientBuilder::new_async()
         .with_connection_info(conn_info)
@@ -35,8 +38,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Verify that the graph database responds.
     let graphs = client.list_graphs().await?;
-    println!("Connected to FalkorDB Cloud.");
-    println!("Existing graphs: {:?}", graphs);
+    eprintln!("Connected to FalkorDB Cloud.");
+    eprintln!("Existing graphs: {:?}", graphs);
 
     let groq_api_key = env::var("GROQ_API_KEY").map_err(|_| "GROQ_API_KEY must be set in .env")?;
 
@@ -45,6 +48,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         groq_api_key,
         http_client: reqwest::Client::new(),
     });
+
+    if env::args().any(|arg| arg == "--mcp") {
+        return mcp::run_mcp(state).await;
+    }
 
     let app = Router::new()
         .route("/health", get(health_check))
@@ -75,7 +82,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
 
-    println!("Axum backend listening on http://localhost:8080");
+    eprintln!("Axum backend listening on http://localhost:8080");
 
     axum::serve(listener, app).await?;
 

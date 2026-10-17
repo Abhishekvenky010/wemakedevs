@@ -79,7 +79,12 @@ pub fn compare_paths(current_paths: &[Value], historical_cases: &[Value]) -> Val
                         .map(str::to_owned)
                         .collect::<Vec<_>>()
                 })
-                .and_then(|wallets| canonical_cycle(&wallets))
+                .and_then(|mut wallets| {
+                    if wallets.len() >= 3 && wallets.first() != wallets.last() {
+                        wallets.push(wallets[0].clone());
+                    }
+                    canonical_cycle(&wallets)
+                })
         })
         .collect();
 

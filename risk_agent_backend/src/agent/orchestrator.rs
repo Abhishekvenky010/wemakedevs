@@ -14,6 +14,7 @@ pub async fn run_groq_agent(
     state: &AppState,
     cycles: &[Value],
     memories: &[Value],
+    comparison: &Value,
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let mut seen_cycles = HashSet::<Vec<String>>::new();
 
@@ -93,24 +94,37 @@ pub async fn run_groq_agent(
          or transactions. Distinguish observations, hypotheses, and \
          limitations. Missing historical paths mean a match cannot be verified.\n\
          CURRENT PATHS: {}\n\
-         HISTORICAL CASES: {}",
+         HISTORICAL CASES: {}\n\
+         GRAPH COMPARISON: {}",
         serde_json::to_string(&compact_cycles).map_err(api_error)?,
-        serde_json::to_string(&compact_memories).map_err(api_error)?
+        serde_json::to_string(&compact_memories).map_err(api_error)?,
+        serde_json::to_string(comparison).map_err(api_error)?
     );
 
     let mut messages = vec![
         json!({
             "role": "system",
             "content": "You are a concise DeFi security investigation agent. \
-             Use the approved read-only graph tools when relevant. Circular \
-             transfers alone do not prove wash trading. Base conclusions only \
-             on supplied evidence and tool results."
+        Use the approved read-only graph tools when relevant. \
+        Circular transfers alone do not prove wash trading. \
+        Base conclusions only on supplied evidence and successful tool results. \
+        If a tool result contains status=\"error\", treat that tool call as failed. \
+        Never present failed tool output as evidence or infer missing facts from it. \
+        Clearly state when required evidence could not be retrieved, and qualify \
+        conclusions accordingly. Distinguish observed facts from hypotheses."
         }),
         json!({
             "role": "user",
             "content": user_content
         }),
     ];
+
+    let mut mcp_client = crate::agent::mcp_client::McpClient::connect()
+        .await
+        .map_err(|error| {
+            eprintln!("MCP client initialization failed: {error}");
+            api_error("Unable to initialize MCP tools")
+        })?;
 
     // Allow at most three rounds with tools, followed by a final
     // request without tools to keep the investigation bounded.
@@ -143,6 +157,7 @@ pub async fn run_groq_agent(
             .unwrap_or_default();
 
         if tool_calls.is_empty() {
+            let _ = mcp_client.close().await;
             return message
                 .get("content")
                 .and_then(Value::as_str)
@@ -154,6 +169,7 @@ pub async fn run_groq_agent(
         // The final round has no tools available. Never execute
         // unexpected tool calls if the provider returns them anyway.
         if round == MAX_TOOL_ROUNDS {
+            let _ = mcp_client.close().await;
             return Err(api_error("Agent reached its tool-call limit"));
         }
 
@@ -181,7 +197,7 @@ pub async fn run_groq_agent(
                 .and_then(Value::as_str)
                 .ok_or_else(|| api_error("Tool call arguments are missing"))?;
 
-            let result = tools::execute(state, name, arguments).await;
+            let result = tools::execute_via_mcp(&mcp_client, name, arguments).await;
 
             let compact_result = compact_tool_result(&result);
 
@@ -192,6 +208,8 @@ pub async fn run_groq_agent(
             }));
         }
     }
+
+    let _ = mcp_client.close().await;
 
     Err(api_error("Agent finished without a final report"))
 }
