@@ -1,5 +1,116 @@
 # WEMAKEDEVS - DeFi Risk Agent
 
+
+
+An automated DeFi risk investigation system that uses graph analytics and multi-hop reasoning to detect fraud, triage security findings, and act on connected data.
+
+## Core Architecture
+
+### Multi-Hop Reasoning Pipeline
+
+The agent follows a structured pipeline to investigate suspicious activities:
+
+1. **Trace Phase** – Use `trace_wallet` tool to detect circular-transfer paths for a given wallet address.
+2. **Context Enrichment** – Use `find_related_cases` tool to locate historical investigations linked to the same wallet.
+3. **Comparison Phase** – Leverage the graph engine (`compare_paths`) to compare current paths with historical records, identifying recurring vs. novel cycles.
+
+### Graph-Based Decision Engine
+
+The graph module (`risk_agent_backend/src/graph/`) provides the analytical backbone:
+
+- **Canonical Cycle Detection** – Normalizes circular-transfer paths into a canonical representation, enabling reliable comparison across different traversal lengths.
+- **Path Comparison** – Compares current wallet paths with historical ones, computing recurrence metrics (recurring vs. new cycles) and novelty status.
+- **Evidence Weighting** – Quantifies confidence, recency, and completeness of historical evidence.
+
+### MCP-Driven Tool Selection
+
+All investigative actions are mediated through Model Context Protocol (MCP):
+
+- **Tool Discovery** – The `tools.rs` module defines approved read-only tools (`trace_wallet`, `find_related_cases`).
+- **Dynamic Invocation** – The orchestrator selects and executes tools based on the current state and available data sources.
+- **Fallback Reporting** – When tools fail or return incomplete results, a structured fallback report is generated from graph evidence.
+
+## Key Capabilities
+
+### Fraud Detection
+Detects circular-transfer paths (potential money laundering or rug-pull indicators) and correlates them with historical investigation cases.
+
+### Security Triage
+Compares current activity against historical patterns to identify recurring threats, novel anomalies, or gaps in evidence.
+
+### Actionable Insights
+Produces explainable reports that distinguish:
+- **Confirmed risks** – Cyclic paths with strong evidence
+- **Potential risks** – New cycles not yet seen historically
+- **Uncertain cases** – Incomplete historical evidence
+- **Safe activities** – No detectable patterns
+
+## System Flow
+
+```
+1. Receive wallet address + data source (real/demo)
+2. Trace wallet → detect cycles
+3. Find related cases → historical investigations
+4. Compare paths → recurrence/novelty analysis
+5. Generate actionable report
+```
+
+## Graph Algorithms
+
+### Canonical Cycle Normalization
+Normalizes arbitrary-length cyclic paths into a minimal canonical form, ensuring consistent comparison regardless of traversal depth.
+
+### Path Comparison
+Compares current and historical paths, computing:
+- **Unique cycles** – Count of distinct cycle structures
+- **Recurring cycles** – Cycles seen in both current and historical data
+- **New cycles** – Novel cycle structures emerging now
+- **Novelty status** – Indicates whether the activity represents a new threat pattern
+
+## Tool Integration
+
+| Tool | Purpose | Data Source |
+|------|---------|-------------|
+| `trace_wallet` | Detect circular-transfer paths | Real/Demo mainnet |
+| `find_related_cases` | Locate historical investigations | Falkor DB |
+
+Both tools are invoked through MCP and their results feed directly into the graph comparison engine.
+
+## Explainability
+
+All reports include:
+- **Cycle Roots** – Identified circular paths with hop counts
+- **Historical Context** – Related cases with findings and confidence scores
+- **Novelty Assessment** – Whether the activity is new or recurring
+- **Limitations** – Clear statements about evidence quality and incompleteness
+
+## Usage
+
+```bash
+# Run the agent
+cargo run --release
+
+# Execute a specific investigation
+curl http://localhost:3000/api/run?address=0xabc...&data_source=real
+```
+
+## Design Principles
+
+- **Multi-hop reasoning** – Each phase builds on the previous, combining graph evidence with tool outputs.
+- **Graph-first decision making** – All conclusions derive from analyzed graph structures, not ad-hoc heuristics.
+- **MCP tool abstraction** – Tool selection is decoupled from business logic, enabling easy addition of new investigative capabilities.
+- **Transparent outcomes** – Every report cites the underlying graph evidence and tool results.
+
+## Extensibility
+
+New investigative capabilities can be added by:
+1. Adding a new tool definition in `tools.rs`
+2. Registering it in the orchestrator's tool registry
+3. Updating the graph comparison logic in `graph/`
+4. Ensuring the tool integrates with the MCP client
+
+
+
 Automated DeFi risk investigation system that uses graph analytics and multi-hop reasoning to detect fraud, triage security findings, and act on connected data.
 
 ## Project Structure
@@ -175,9 +286,5 @@ npm test
 
 MIT - see individual files for license details.
 
-## Support
 
-For issues or questions, reference the global README and project-specific documents:
-- `risk_agent_backend/README.md` – Backend architecture and setup
-- `SolanaFlowgraph/` – Graph visualization component
-- Individual service READMEs in respective directories
+
