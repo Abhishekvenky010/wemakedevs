@@ -290,4 +290,59 @@ mod tests {
         assert_eq!(result["historical_unique_cycles"], 0);
         assert_eq!(result["uncomparable_historical_records"], 1);
     }
+
+    #[test]
+    fn cycle_counts_derived_from_usable_graph_evidence_not_metadata() {
+        // A historical case with a plausible-sounding finding and count field
+        // but graph_evidence that does not actually form a valid cycle
+        // must not contribute to historical_unique_cycles.
+        let current = vec![path(&["A", "B", "C", "A"])];
+        let historical = vec![json!({
+            "id": "misleading-case",
+            "finding": "Large wash-trading ring detected",
+            "graph_evidence": [
+                { "path_wallets": ["A", "B", "C"] },
+                { "path_wallets": ["X", "Y"] }
+            ]
+        })];
+
+        let result = compare_paths(&current, &historical);
+
+        assert_eq!(result["current_unique_cycles"], 1);
+        assert_eq!(result["historical_unique_cycles"], 0);
+        assert_eq!(result["recurring_cycles"].as_array().unwrap().len(), 0);
+        assert_eq!(result["new_cycles"].as_array().unwrap().len(), 1);
+        assert_eq!(result["uncomparable_historical_records"], 1);
+    }
+
+    #[test]
+    fn mixed_comparable_and_uncomparable_historical_records() {
+        let current = vec![path(&["A", "B", "C", "A"])];
+        let historical = vec![
+            json!({
+                "id": "good-case",
+                "graph_evidence": [
+                    { "path_wallets": ["A", "B", "C", "A"] }
+                ]
+            }),
+            json!({
+                "id": "bad-case",
+                "finding": "Some historical finding",
+                "graph_evidence": null
+            }),
+            json!({
+                "id": "empty-case",
+                "graph_evidence": []
+            }),
+        ];
+
+        let result = compare_paths(&current, &historical);
+
+        assert_eq!(result["current_unique_cycles"], 1);
+        assert_eq!(result["historical_unique_cycles"], 1);
+        assert_eq!(result["recurring_cycles"].as_array().unwrap().len(), 1);
+        assert_eq!(result["new_cycles"].as_array().unwrap().len(), 0);
+        assert_eq!(result["uncomparable_historical_records"], 2);
+        assert_eq!(result["novelty_status"], "uncertain_incomplete_history");
+    }
 }

@@ -8,13 +8,120 @@ use crate::{
     state::AppState,
 };
 
-const MAX_TOOL_ROUNDS: usize = 1;
+/// Maximum rounds where tools are available, followed by one final text-only round.
+const MAX_TOOL_ROUNDS: usize = 3;
+
+/// Strip raw tool-call markup from text so it is never presented as the final AI report.
+/// Removes XML-style ``...`` blocks and
+/// function-call style ``...`` blocks.
+fn strip_tool_call_markup(text: &str) -> String {
+    let mut out = text.to_string();
+
+    let lt: char = char::from_u32(60).unwrap();
+    let gt: char = char::from_u32(62).unwrap();
+
+    // Build  and  patterns.
+    let open_tc: String = lt.to_string() + "tool_call" + &gt.to_string();
+    let close_tc: String = lt.to_string() + "/" + "tool_call" + &gt.to_string();
+
+    // Remove  ...  blocks.
+    let mut pos = 0;
+    while let Some(start) = out[pos..].find(&open_tc) {
+        let abs = pos + start;
+        if let Some(end) = out[abs..].find(&close_tc) {
+            let end_abs = abs + end + close_tc.len();
+            out.replace_range(abs..end_abs, "");
+            pos = abs;
+        } else {
+            out.replace_range(abs.., "");
+            break;
+        }
+    }
+
+    // Build  and  patterns.
+    let open_fn: String = lt.to_string() + "function=";
+    let close_fn: String = lt.to_string() + "/" + "function" + &gt.to_string();
+
+    // Remove  ...  blocks.
+    pos = 0;
+    while let Some(start) = out[pos..].find(&open_fn) {
+        let abs = pos + start;
+        if let Some(end) = out[abs..].find(&close_fn) {
+            let end_abs = abs + end + close_fn.len();
+            out.replace_range(abs..end_abs, "");
+            pos = abs;
+        } else {
+            out.replace_range(abs.., "");
+            break;
+        }
+    }
+
+    out
+}
+
+/// Build a grounded fallback report from the available graph evidence when the
+/// agent loop cannot produce a final text report. Never fabricates findings.
+fn build_fallback_report(
+    cycles: &[Value],
+    _memories: &[Value],
+    comparison: &Value,
+    address: &str,
+) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!("## DeFi Risk Investigation Report\n"));
+    lines.push(format!("**Address:** {}\n", address));
+
+    if cycles.is_empty() {
+        lines.push("No circular-transfer paths were detected for this address.\n".to_string());
+    } else {
+        lines.push(format!("**Cycle roots flagged:** {}\n", cycles.len()));
+        lines.push("**Finding:** Circular-transfer paths were detected; this is a risk signal, not proof of wrongdoing.\n".to_string());
+        lines.push("### Detected Paths\n".to_string());
+        for (i, cycle) in cycles.iter().enumerate().take(10) {
+            let wallet = cycle.get("wallet").and_then(Value::as_str).unwrap_or("unknown");
+            let hop_count = cycle.get("hop_count").and_then(Value::as_i64).unwrap_or(0);
+            let path = cycle.get("path_wallets").and_then(Value::as_array).map(|arr| {
+                arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" -> ")
+            }).unwrap_or_default();
+            lines.push(format!("{}. {} ({} hops): {}", i + 1, wallet, hop_count, path));
+        }
+        lines.push(String::new());
+    }
+
+    let current_unique = comparison.get("current_unique_cycles").and_then(Value::as_u64).unwrap_or(0);
+    let historical_unique = comparison.get("historical_unique_cycles").and_then(Value::as_u64).unwrap_or(0);
+    let recurring = comparison.get("recurring_cycles").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    let new_cycles = comparison.get("new_cycles").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
+    let novelty = comparison.get("novelty_status").and_then(Value::as_str).unwrap_or("unknown");
+
+    lines.push("### Historical Comparison\n".to_string());
+    lines.push(format!("- Current unique cycles: {}", current_unique));
+    lines.push(format!("- Historical unique cycles: {}", historical_unique));
+    lines.push(format!("- Recurring cycles: {}", recurring));
+    lines.push(format!("- New cycles: {}", new_cycles));
+    lines.push(format!("- Novelty status: {}\n", novelty));
+
+    if let Some(limitations) = comparison.get("limitations").and_then(Value::as_array) {
+        lines.push("### Limitations\n".to_string());
+        for lim in limitations.iter().take(5) {
+            if let Some(text) = lim.as_str() {
+                lines.push(format!("- {}", text));
+            }
+        }
+    }
+
+    lines.push("\n---\n*This is a prototype risk signal, not a calibrated fraud assessment.*".to_string());
+
+    lines.join("\n")
+}
 
 pub async fn run_groq_agent(
     state: &AppState,
     cycles: &[Value],
     memories: &[Value],
     comparison: &Value,
+    address: &str,
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let mut seen_cycles = HashSet::<Vec<String>>::new();
 
@@ -105,13 +212,17 @@ pub async fn run_groq_agent(
         json!({
             "role": "system",
             "content": "You are a concise DeFi security investigation agent. \
-        Use the approved read-only graph tools when relevant. \
-        Circular transfers alone do not prove wash trading. \
+        Use only the supplied tool results and structured evidence for factual claims. \
+        Never invent case IDs, record counts, hop counts, timestamps, transaction details, \
+        token amounts, ownership relationships, or any ownership relationships. \
+        Distinguish current graph paths from historical investigation paths. \
+        Treat graph data as evidence, not proof of wrongdoing. \
         Base conclusions only on supplied evidence and successful tool results. \
         If a tool result contains status=\"error\", treat that tool call as failed. \
         Never present failed tool output as evidence or infer missing facts from it. \
         Clearly state when required evidence could not be retrieved, and qualify \
-        conclusions accordingly. Distinguish observed facts from hypotheses."
+        conclusions accordingly. Distinguish observed facts from hypotheses; \
+        do not present hypotheses as observed facts."
         }),
         json!({
             "role": "user",
@@ -126,8 +237,7 @@ pub async fn run_groq_agent(
             api_error("Unable to initialize MCP tools")
         })?;
 
-    // Allow at most three rounds with tools, followed by a final
-    // request without tools to keep the investigation bounded.
+    // Allow at most MAX_TOOL_ROUNDS with tools, followed by one final text-only round.
     for round in 0..=MAX_TOOL_ROUNDS {
         let available_tools = if round < MAX_TOOL_ROUNDS {
             tools::definitions()
@@ -157,20 +267,29 @@ pub async fn run_groq_agent(
             .unwrap_or_default();
 
         if tool_calls.is_empty() {
-            let _ = mcp_client.close().await;
-            return message
+            let content = message
                 .get("content")
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                .filter(|content| !content.trim().is_empty())
-                .ok_or_else(|| api_error("Groq returned no final report text"));
+                .unwrap_or_default();
+
+            let sanitized = strip_tool_call_markup(&content);
+
+            if !sanitized.trim().is_empty() {
+                let _ = mcp_client.close().await;
+                return Ok(sanitized);
+            }
+
+            // Content was empty or only tool-call markup. Fall through to fallback.
+            let _ = mcp_client.close().await;
+            return Ok(build_fallback_report(&compact_cycles, &compact_memories, comparison, address));
         }
 
         // The final round has no tools available. Never execute
         // unexpected tool calls if the provider returns them anyway.
         if round == MAX_TOOL_ROUNDS {
             let _ = mcp_client.close().await;
-            return Err(api_error("Agent reached its tool-call limit"));
+            return Ok(build_fallback_report(&compact_cycles, &compact_memories, comparison, address));
         }
 
         // Preserve Groq's assistant message, including tool-call IDs.
@@ -211,7 +330,7 @@ pub async fn run_groq_agent(
 
     let _ = mcp_client.close().await;
 
-    Err(api_error("Agent finished without a final report"))
+    Ok(build_fallback_report(&compact_cycles, &compact_memories, comparison, address))
 }
 
 /// Shrink tool results before echoing them back into the message history so
@@ -264,4 +383,96 @@ fn compact_case_item(item: &Value) -> Value {
     }
 
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lt() -> char {
+        char::from_u32(60).unwrap()
+    }
+    fn gt() -> char {
+        char::from_u32(62).unwrap()
+    }
+
+    fn tc_open() -> String {
+        lt().to_string() + "tool_call" + &gt().to_string()
+    }
+    fn tc_close() -> String {
+        lt().to_string() + "/" + "tool_call" + &gt().to_string()
+    }
+
+    #[test]
+    fn strip_tool_call_markup_removes_xml_blocks() {
+        let open = tc_open();
+        let close = tc_close();
+        let input = format!("Preamble {}{}content {}{}suffix", open, close, open, close);
+        let result = strip_tool_call_markup(&input);
+        assert!(!result.contains("tool_call"));
+        assert!(result.contains("Preamble"));
+        assert!(result.contains("content"));
+        assert!(result.contains("suffix"));
+    }
+
+    #[test]
+    fn strip_tool_call_markup_leaves_plain_text() {
+        let input = "This is a normal risk report with no markup.";
+        let result = strip_tool_call_markup(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn strip_tool_call_markup_handles_multiple_blocks() {
+        let open = tc_open();
+        let close = tc_close();
+        let input = format!("A {}{}B {}{}C", open, close, open, close);
+        let result = strip_tool_call_markup(&input);
+        assert_eq!(result, "A B C");
+    }
+
+    #[test]
+    fn build_fallback_report_includes_address_and_cycles() {
+        let cycles: Vec<Value> = vec![json!({
+            "wallet": "demo_wallet_1",
+            "hop_count": 3,
+            "path_wallets": ["demo_wallet_1", "demo_wallet_2", "demo_wallet_3", "demo_wallet_1"]
+        })];
+        let memories: Vec<Value> = vec![];
+        let comparison = json!({
+            "current_unique_cycles": 1,
+            "historical_unique_cycles": 1,
+            "recurring_cycles": [["demo_wallet_1", "demo_wallet_2", "demo_wallet_3"]],
+            "new_cycles": [],
+            "novelty_status": "no_new_cycles_detected",
+            "limitations": ["Only saved wallet paths are compared."]
+        });
+
+        let report = build_fallback_report(&cycles, &memories, &comparison, "demo_wallet_1");
+
+        assert!(report.contains("demo_wallet_1"));
+        assert_eq!(report.contains("No circular-transfer paths were detected"), false);
+        assert!(report.contains("**Cycle roots flagged:** 1"));
+        assert!(report.contains("risk signal, not proof of wrongdoing"));
+        assert!(report.contains("Novelty status: no_new_cycles_detected"));
+    }
+
+    #[test]
+    fn build_fallback_report_empty_cycles() {
+        let cycles: Vec<Value> = vec![];
+        let memories: Vec<Value> = vec![];
+        let comparison = json!({
+            "current_unique_cycles": 0,
+            "historical_unique_cycles": 0,
+            "recurring_cycles": [],
+            "new_cycles": [],
+            "novelty_status": "no_new_cycles_detected",
+            "limitations": []
+        });
+
+        let report = build_fallback_report(&cycles, &memories, &comparison, "demo_wallet_1");
+
+        assert!(report.contains("No circular-transfer paths were detected"));
+        assert!(report.contains("demo_wallet_1"));
+    }
 }

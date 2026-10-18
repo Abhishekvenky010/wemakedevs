@@ -1,5 +1,7 @@
 use axum::{Json, extract::State};
+use serde::Deserialize;
 use futures::TryStreamExt;
+use serde_json::Value;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -8,16 +10,35 @@ use crate::error::api_error;
 use crate::graph::comparison::compare_paths;
 use crate::state::AppState;
 
-// Generate an AI-powered risk report based on graph data
+#[derive(Deserialize)]
+pub struct GenerateRiskReportRequest {
+    pub address: String,
+}
+
+// Generate an AI-powered risk report based on graph data for a specific wallet address.
 pub async fn generate_risk_report(
     State(state): State<Arc<AppState>>,
+    Json(payload): Json<GenerateRiskReportRequest>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
-    // Fetch circular-transfer evidence from FalkorDB.
+    let address = payload.address.trim();
+
+    if address.is_empty() {
+        return Err((
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "status": "error",
+                "error": "Wallet address cannot be empty"
+            })),
+        ));
+    }
+
+    // Fetch circular-transfer evidence from FalkorDB, filtered by the requested address.
     let mut graph = state.falkor_client.select_graph("defi_risk");
 
     let query = r#"
         MATCH path =
-            (start:Wallet)-[:TRANSFERRED_TO*3..6]->(start)
+            (start:Wallet {address: $address})
+            -[:TRANSFERRED_TO*3..6]->(start)
         RETURN DISTINCT
             coalesce(start.address, 'unknown_wallet') AS wallet,
             length(path) AS hop_count,
@@ -25,7 +46,11 @@ pub async fn generate_risk_report(
         LIMIT 10
     "#;
 
-    let mut result = graph.ro_query(query).execute().await.map_err(api_error)?;
+    let mut result = graph
+        .ro_query(query)
+        .with_param("address", address.to_string())
+        .execute()
+        .await.map_err(api_error)?;
 
     let mut cycles = Vec::<serde_json::Value>::new();
 
@@ -42,10 +67,11 @@ pub async fn generate_risk_report(
     }
 
     // Retrieve previous investigations linked to wallets
-    // participating in the currently detected cycles.
+    // participating in cycles for the requested address.
     let memory_query = r#"
         MATCH path =
-            (start:Wallet)-[:TRANSFERRED_TO*3..6]->(start)
+            (start:Wallet {address: $address})
+            -[:TRANSFERRED_TO*3..6]->(start)
         WITH collect(DISTINCT start.address) AS cycle_wallets
         UNWIND cycle_wallets AS wallet_address
         MATCH (i:Investigation)-[:INVOLVES]->(w:Wallet)
@@ -64,6 +90,7 @@ pub async fn generate_risk_report(
 
     let mut memory_result = graph
         .ro_query(memory_query)
+        .with_param("address", address.to_string())
         .execute()
         .await
         .map_err(api_error)?;
@@ -130,25 +157,28 @@ pub async fn generate_risk_report(
     });
 
     // Let Groq choose and execute approved read-only graph tools.
-    let report = run_groq_agent(&state, &cycles, &memories, &comparison).await?;
+    let report = run_groq_agent(&state, &cycles, &memories, &comparison, address).await?;
 
-    let wallets: HashSet<String> = cycles
-        .iter()
-        .filter_map(|cycle| cycle.get("wallet"))
-        .filter_map(serde_json::Value::as_str)
-        .map(str::to_owned)
-        .collect();
+    let mut participant_set: HashSet<String> = HashSet::new();
+    for cycle in &cycles {
+        if let Some(path) = cycle.get("path_wallets").and_then(Value::as_array) {
+            for wallet in path.iter().filter_map(Value::as_str) {
+                participant_set.insert(wallet.to_string());
+            }
+        }
+    }
+    let cycle_participant_count = participant_set.len();
 
-    let unique_cycle_roots = wallets.len();
-    let wallet_addresses: Vec<String> = wallets.into_iter().collect();
-
-    let finding = if unique_cycle_roots > 0 {
+    let finding = if cycle_participant_count > 0 {
         "Circular-transfer pattern detected"
     } else {
         "No circular-transfer pattern detected"
     };
 
     let graph_evidence_json = serde_json::to_string(&cycles).map_err(api_error)?;
+
+    let mut participant_addresses: Vec<String> = participant_set.into_iter().collect();
+    participant_addresses.sort();
 
     let save_query = r#"
     CREATE (i:Investigation {
@@ -178,7 +208,7 @@ pub async fn generate_risk_report(
         .with_param("finding", finding.to_string())
         .with_param("report", report.clone())
         .with_param("graph_evidence_json", graph_evidence_json)
-        .with_param("wallets", wallet_addresses)
+        .with_param("wallets", participant_addresses)
         .execute()
         .await
         .map_err(api_error)?;
@@ -196,7 +226,8 @@ pub async fn generate_risk_report(
 
     Ok(Json(serde_json::json!({
         "status": "success",
-        "wallets_flagged": unique_cycle_roots,
+        "cycle_participant_count": cycle_participant_count,
+        "wallets_flagged": cycle_participant_count,
         "graph_evidence": cycles,
         "investigation_diff": comparison,
         "structured_report": structured_report,

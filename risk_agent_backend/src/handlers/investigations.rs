@@ -80,7 +80,7 @@ pub async fn list_investigations(
     while let Some(row) = result.data.try_next().await.map_err(api_error)? {
         let id: String = row.try_get("id").map_err(api_error)?;
         let finding: String = row.try_get("finding").map_err(api_error)?;
-        let confidence: f64 = row.try_get("confidence").map_err(api_error)?;
+        let confidence: Option<f64> = row.try_get("confidence").map_err(api_error)?;
         let created_at: i64 = row.try_get("created_at").map_err(api_error)?;
         let status: String = row.try_get("status").map_err(api_error)?;
 
