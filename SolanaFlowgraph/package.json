@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:risk": "node --experimental-strip-types --test src/lib/risk/api.test.mjs"
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.1",

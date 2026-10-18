@@ -1,3 +1,4 @@
+use crate::graph::provenance::{DataSource, PROP_DATA_SOURCE};
 use falkordb::FalkorAsyncClient;
 use futures::TryStreamExt;
 use serde_json::{Value, json};
@@ -5,12 +6,15 @@ use serde_json::{Value, json};
 pub async fn find_related_cases(
     client: &FalkorAsyncClient,
     address: &str,
+    data_source: DataSource,
 ) -> Result<Vec<Value>, String> {
     let mut graph = client.select_graph("defi_risk");
 
-    let query = r#"
-        MATCH (i:Investigation)-[:INVOLVES]->(w:Wallet)
-        WHERE w.address = $address
+    let data_source_value = data_source.as_investigation_value();
+
+    let query = format!(
+        r#"MATCH (i:Investigation)-[:INVOLVES]->(w:Wallet)
+        WHERE w.address = $address AND i.{data_source_prop} = $data_source
         RETURN DISTINCT
             coalesce(i.id, 'unknown') AS id,
             coalesce(i.finding, 'Unknown finding') AS finding,
@@ -27,12 +31,14 @@ pub async fn find_related_cases(
                 AND i.status IS NOT NULL
             ) AS record_complete
         ORDER BY created_at DESC
-        LIMIT 20
-    "#;
+        LIMIT 20"#,
+        data_source_prop = PROP_DATA_SOURCE
+    );
 
     let mut result = graph
-        .ro_query(query)
+        .ro_query(&query)
         .with_param("address", address.to_string())
+        .with_param("data_source", data_source_value.to_string())
         .execute()
         .await
         .map_err(|e| e.to_string())?;

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 use crate::{
     agent::{groq::chat_completion, tools},
     error::api_error,
+    graph::provenance::DataSource,
     state::AppState,
 };
 
@@ -73,27 +74,63 @@ fn build_fallback_report(
     lines.push(format!("**Address:** {}\n", address));
 
     if cycles.is_empty() {
-        lines.push("No circular-transfer paths were detected for this address.\n".to_string());
+        lines.push(
+            "No circular-transfer paths were detected in the available graph evidence.\n"
+                .to_string(),
+        );
     } else {
         lines.push(format!("**Cycle roots flagged:** {}\n", cycles.len()));
         lines.push("**Finding:** Circular-transfer paths were detected; this is a risk signal, not proof of wrongdoing.\n".to_string());
         lines.push("### Detected Paths\n".to_string());
         for (i, cycle) in cycles.iter().enumerate().take(10) {
-            let wallet = cycle.get("wallet").and_then(Value::as_str).unwrap_or("unknown");
+            let wallet = cycle
+                .get("wallet")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             let hop_count = cycle.get("hop_count").and_then(Value::as_i64).unwrap_or(0);
-            let path = cycle.get("path_wallets").and_then(Value::as_array).map(|arr| {
-                arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join(" -> ")
-            }).unwrap_or_default();
-            lines.push(format!("{}. {} ({} hops): {}", i + 1, wallet, hop_count, path));
+            let path = cycle
+                .get("path_wallets")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                })
+                .unwrap_or_default();
+            lines.push(format!(
+                "{}. {} ({} hops): {}",
+                i + 1,
+                wallet,
+                hop_count,
+                path
+            ));
         }
         lines.push(String::new());
     }
 
-    let current_unique = comparison.get("current_unique_cycles").and_then(Value::as_u64).unwrap_or(0);
-    let historical_unique = comparison.get("historical_unique_cycles").and_then(Value::as_u64).unwrap_or(0);
-    let recurring = comparison.get("recurring_cycles").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
-    let new_cycles = comparison.get("new_cycles").and_then(Value::as_array).map(|a| a.len()).unwrap_or(0);
-    let novelty = comparison.get("novelty_status").and_then(Value::as_str).unwrap_or("unknown");
+    let current_unique = comparison
+        .get("current_unique_cycles")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let historical_unique = comparison
+        .get("historical_unique_cycles")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let recurring = comparison
+        .get("recurring_cycles")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let new_cycles = comparison
+        .get("new_cycles")
+        .and_then(Value::as_array)
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let novelty = comparison
+        .get("novelty_status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
 
     lines.push("### Historical Comparison\n".to_string());
     lines.push(format!("- Current unique cycles: {}", current_unique));
@@ -111,7 +148,9 @@ fn build_fallback_report(
         }
     }
 
-    lines.push("\n---\n*This is a prototype risk signal, not a calibrated fraud assessment.*".to_string());
+    lines.push(
+        "\n---\n*This is a prototype risk signal, not a calibrated fraud assessment.*".to_string(),
+    );
 
     lines.join("\n")
 }
@@ -122,6 +161,7 @@ pub async fn run_groq_agent(
     memories: &[Value],
     comparison: &Value,
     address: &str,
+    data_source: DataSource,
 ) -> Result<String, (StatusCode, Json<Value>)> {
     let mut seen_cycles = HashSet::<Vec<String>>::new();
 
@@ -192,20 +232,25 @@ pub async fn run_groq_agent(
         .collect();
 
     let user_content = format!(
-        "Investigate this DeFi activity using the supplied evidence. \
+        "Investigate this DeFi activity for wallet {address} using the supplied evidence. \
+         The investigation data source is '{data_source}'. Pass that exact source to graph tools. \
          When wallet addresses are available, use trace_wallet to check \
          current graph paths and find_related_cases to inspect historical \
          investigations. Avoid repeating the same lookup. Use no more than \
          the available tool-call rounds. Treat graph data as evidence, not \
          proof of wrongdoing. Never invent amounts, timestamps, ownership, \
          or transactions. Distinguish observations, hypotheses, and \
-         limitations. Missing historical paths mean a match cannot be verified.\n\
-         CURRENT PATHS: {}\n\
-         HISTORICAL CASES: {}\n\
-         GRAPH COMPARISON: {}",
-        serde_json::to_string(&compact_cycles).map_err(api_error)?,
-        serde_json::to_string(&compact_memories).map_err(api_error)?,
-        serde_json::to_string(comparison).map_err(api_error)?
+         limitations. Missing historical paths mean a match cannot be verified. \
+         If coverage limitations are present, explicitly state them and do not present \
+         the findings as complete or conclude that the wallet is safe.\n\
+         CURRENT PATHS: {current_paths}\n\
+         HISTORICAL CASES: {historical_cases}\n\
+         GRAPH COMPARISON: {comparison}",
+        address = address,
+        data_source = data_source.as_investigation_value(),
+        current_paths = serde_json::to_string(&compact_cycles).map_err(api_error)?,
+        historical_cases = serde_json::to_string(&compact_memories).map_err(api_error)?,
+        comparison = serde_json::to_string(comparison).map_err(api_error)?
     );
 
     let mut messages = vec![
@@ -282,14 +327,24 @@ pub async fn run_groq_agent(
 
             // Content was empty or only tool-call markup. Fall through to fallback.
             let _ = mcp_client.close().await;
-            return Ok(build_fallback_report(&compact_cycles, &compact_memories, comparison, address));
+            return Ok(build_fallback_report(
+                &compact_cycles,
+                &compact_memories,
+                comparison,
+                address,
+            ));
         }
 
         // The final round has no tools available. Never execute
         // unexpected tool calls if the provider returns them anyway.
         if round == MAX_TOOL_ROUNDS {
             let _ = mcp_client.close().await;
-            return Ok(build_fallback_report(&compact_cycles, &compact_memories, comparison, address));
+            return Ok(build_fallback_report(
+                &compact_cycles,
+                &compact_memories,
+                comparison,
+                address,
+            ));
         }
 
         // Preserve Groq's assistant message, including tool-call IDs.
@@ -316,7 +371,7 @@ pub async fn run_groq_agent(
                 .and_then(Value::as_str)
                 .ok_or_else(|| api_error("Tool call arguments are missing"))?;
 
-            let result = tools::execute_via_mcp(&mcp_client, name, arguments).await;
+            let result = tools::execute_via_mcp(&mcp_client, name, arguments, data_source).await;
 
             let compact_result = compact_tool_result(&result);
 
@@ -330,7 +385,12 @@ pub async fn run_groq_agent(
 
     let _ = mcp_client.close().await;
 
-    Ok(build_fallback_report(&compact_cycles, &compact_memories, comparison, address))
+    Ok(build_fallback_report(
+        &compact_cycles,
+        &compact_memories,
+        comparison,
+        address,
+    ))
 }
 
 /// Shrink tool results before echoing them back into the message history so
@@ -451,7 +511,10 @@ mod tests {
         let report = build_fallback_report(&cycles, &memories, &comparison, "demo_wallet_1");
 
         assert!(report.contains("demo_wallet_1"));
-        assert_eq!(report.contains("No circular-transfer paths were detected"), false);
+        assert_eq!(
+            report.contains("No circular-transfer paths were detected"),
+            false
+        );
         assert!(report.contains("**Cycle roots flagged:** 1"));
         assert!(report.contains("risk signal, not proof of wrongdoing"));
         assert!(report.contains("Novelty status: no_new_cycles_detected"));

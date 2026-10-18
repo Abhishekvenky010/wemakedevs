@@ -1,4 +1,5 @@
 // Tool schemas and utility functions for Groq agent tool calls.
+use crate::graph::provenance::DataSource;
 use crate::state::AppState;
 use serde_json::{Value, json};
 
@@ -15,6 +16,10 @@ pub fn definitions() -> Value {
                         "address": {
                             "type": "string",
                             "description": "Wallet address to trace."
+                        },
+                        "data_source": {
+                            "type": "string",
+                            "description": "Data source: 'real' for verified mainnet transfers or 'demo' for synthetic evidence. Defaults to 'real'."
                         }
                     },
                     "required": ["address"],
@@ -33,6 +38,10 @@ pub fn definitions() -> Value {
                         "address": {
                             "type": "string",
                             "description": "Wallet address to look up."
+                        },
+                        "data_source": {
+                            "type": "string",
+                            "description": "Data source: 'real' for verified investigations or 'demo' for synthetic investigations. Defaults to 'real'."
                         }
                     },
                     "required": ["address"],
@@ -47,10 +56,6 @@ fn validate_address(arguments: &Value) -> Result<String, String> {
     let object = arguments
         .as_object()
         .ok_or_else(|| "Tool arguments must be a JSON object".to_string())?;
-
-    if object.len() != 1 {
-        return Err("Expected exactly one argument: address".to_string());
-    }
 
     let address = object
         .get("address")
@@ -67,6 +72,14 @@ fn validate_address(arguments: &Value) -> Result<String, String> {
     }
 
     Ok(address.to_string())
+}
+
+fn extract_data_source(arguments: &Value) -> DataSource {
+    arguments
+        .get("data_source")
+        .and_then(Value::as_str)
+        .map(DataSource::from_request)
+        .unwrap_or(DataSource::Real)
 }
 
 pub async fn execute(state: &AppState, name: &str, raw_arguments: &str) -> Value {
@@ -97,12 +110,21 @@ pub async fn execute(state: &AppState, name: &str, raw_arguments: &str) -> Value
         }
     };
 
+    let data_source = extract_data_source(&arguments);
+
     match name {
         "trace_wallet" => {
-            match crate::graph::wallet::trace_wallet_data(&state.falkor_client, &address).await {
+            match crate::graph::wallet::trace_wallet_data(
+                &state.falkor_client,
+                &address,
+                data_source,
+            )
+            .await
+            {
                 Ok(cycles) => json!({
                     "status": "success",
                     "wallet": address,
+                    "data_source": data_source.as_edge_source(),
                     "detected_cycles": cycles.len(),
                     "cycles": cycles
                 }),
@@ -117,12 +139,17 @@ pub async fn execute(state: &AppState, name: &str, raw_arguments: &str) -> Value
         }
 
         "find_related_cases" => {
-            match crate::graph::investigations::find_related_cases(&state.falkor_client, &address)
-                .await
+            match crate::graph::investigations::find_related_cases(
+                &state.falkor_client,
+                &address,
+                data_source,
+            )
+            .await
             {
                 Ok(cases) => json!({
                     "status": "success",
                     "wallet": address,
+                    "data_source": data_source.as_investigation_value(),
                     "cases_found": cases.len(),
                     "cases": cases
                 }),
@@ -144,6 +171,7 @@ pub async fn execute_via_mcp(
     client: &crate::agent::mcp_client::McpClient,
     name: &str,
     raw_arguments: &str,
+    data_source: DataSource,
 ) -> Value {
     if name != "trace_wallet" && name != "find_related_cases" {
         return json!({
@@ -172,7 +200,16 @@ pub async fn execute_via_mcp(
         }
     };
 
-    match client.call_tool(name, json!({ "address": address })).await {
+    match client
+        .call_tool(
+            name,
+            json!({
+                "address": address,
+                "data_source": data_source.as_investigation_value()
+            }),
+        )
+        .await
+    {
         Ok(result) => result,
         Err(error) => {
             eprintln!("MCP tool call failed: {error}");

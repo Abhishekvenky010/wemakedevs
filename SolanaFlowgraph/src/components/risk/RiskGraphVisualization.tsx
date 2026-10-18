@@ -10,6 +10,8 @@ export interface RiskGraphVisualizationProps {
   height?: number;
 }
 
+const NODE_GRADIENT_IDS = ['nodeGradient-blue', 'nodeGradient-indigo', 'nodeGradient-purple', 'nodeGradient-emerald'];
+
 export default function RiskGraphVisualization({
   evidence,
   height = 420,
@@ -42,6 +44,50 @@ export default function RiskGraphVisualization({
       .attr('width', width)
       .attr('height', heightLocal);
 
+    // Define gradients for nodes
+    const defs = svg.append('defs');
+
+    NODE_GRADIENT_IDS.forEach((id, index) => {
+      const gradient = defs.append('linearGradient')
+        .attr('id', id)
+        .attr('x1', '0%')
+        .attr('y1', '0%')
+        .attr('x2', '100%')
+        .attr('y2', '100%');
+
+      const colors = [
+        ['#3b82f6', '#1e40af'],
+        ['#6366f1', '#4338ca'],
+        ['#a855f7', '#7e22ce'],
+        ['#10b981', '#047857'],
+      ];
+      const [from, to] = colors[index % colors.length];
+
+      gradient.append('stop')
+        .attr('offset', '0%')
+        .attr('stop-color', from);
+      gradient.append('stop')
+        .attr('offset', '100%')
+        .attr('stop-color', to);
+    });
+
+    // Define link gradients
+    defs.append('linearGradient')
+      .attr('id', 'linkGradient')
+      .attr('x1', '0%')
+      .attr('y1', '0%')
+      .attr('x2', '100%')
+      .attr('y2', '100%')
+      .selectAll('stop')
+      .data([
+        { offset: '0%', color: '#94a3b8' },
+        { offset: '100%', color: '#64748b' },
+      ])
+      .enter()
+      .append('stop')
+      .attr('offset', (d: any) => d.offset)
+      .attr('stop-color', (d: any) => d.color);
+
     if (!zoomRef.current) {
       const zoom = d3.zoom<SVGSVGElement, unknown>()
         .scaleExtent([0.25, 5])
@@ -55,12 +101,13 @@ export default function RiskGraphVisualization({
     const g = svg.append('g');
     gRef.current = g;
 
+    // Background rect for zoom area
     g.append('rect')
       .attr('width', width * 3)
       .attr('height', heightLocal * 3)
       .attr('x', -width)
       .attr('y', -heightLocal)
-      .attr('fill', 'none')
+      .attr('fill', '#f8fafc')
       .attr('pointer-events', 'all');
 
     const simulation = d3
@@ -70,60 +117,101 @@ export default function RiskGraphVisualization({
         d3
           .forceLink(graph.links)
           .id((d: any) => d.id)
-          .distance(90)
+          .distance(100)
+          .strength(0.8)
       )
-      .force('charge', d3.forceManyBody().strength(-320))
+      .force('charge', d3.forceManyBody().strength(-400))
       .force('center', d3.forceCenter(width / 2, heightLocal / 2))
       .force('x', d3.forceX(width / 2).strength(0.1))
       .force('y', d3.forceY(heightLocal / 2).strength(0.1));
 
-    const links = g
-      .append('g')
+    // Links with gradient
+    const linkGroup = g.append('g').attr('class', 'links');
+
+    const links = linkGroup
       .selectAll('line')
       .data(graph.links)
       .enter()
       .append('line')
-      .attr('stroke', '#94a3b8')
-      .attr('stroke-opacity', 0.6)
-      .attr('stroke-width', (d: Link) => Math.sqrt(d.value));
+      .attr('stroke', 'url(#linkGradient)')
+      .attr('stroke-opacity', 0.5)
+      .attr('stroke-width', (d: any) => Math.min(Math.sqrt(d.value) * 1.5, 6))
+      .attr('stroke-linecap', 'round');
 
-    const nodesGroup = g.append('g');
+    // Add link arrow markers
+    defs.append('marker')
+      .attr('id', 'arrow')
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 15)
+      .attr('refY', 0)
+      .attr('markerWidth', 8)
+      .attr('markerHeight', 8)
+      .attr('orient', 'auto')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', '#94a3b8');
 
-    const nodes = nodesGroup
-      .selectAll('circle')
-      .data(graph.nodes)
+    // Create nodes using simpler approach - just append all fresh
+    const nodeGroup = g.append('g').attr('class', 'nodes');
+    
+    const nodeElements = nodeGroup
+      .selectAll('g.node')
+      .data((graph.nodes as any) as any, (d: any) => d.id)
       .enter()
-      .append('circle')
-      .attr('r', (d: Node) => Math.sqrt(d.value) + 2)
-      .attr('fill', (d: Node) => {
-        const colors = ['#0ea5e9', '#14b8a6', '#f59e0b'];
-        return colors[d.group % colors.length];
+      .append('g')
+      .attr('class', 'node')
+      .attr('cursor', 'pointer')
+      .style('cursor', 'pointer');
+
+    nodeElements.append('circle')
+      .attr('r', (d: any) => Math.min(Math.sqrt(d.value) + 3, 22))
+      .attr('fill', (d: any, i: number) => `url(#${NODE_GRADIENT_IDS[i % NODE_GRADIENT_IDS.length]})`)
+      .attr('stroke', '#ffffff')
+      .attr('stroke-width', 2.5)
+      .attr('filter', 'drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1))')
+      .on('mouseover', function(event: any, d: any) {
+        d3.select(this)
+          .attr('r', Math.min(Math.sqrt(d.value) + 3, 22) + 3)
+          .attr('stroke-width', 3)
+          .attr('filter', 'drop-shadow(0 8px 12px rgba(0, 0, 0, 0.15))');
       })
-      .attr('stroke', '#fff')
-      .attr('stroke-width', 1.5)
-      .call(
-        d3.drag<SVGCircleElement, Node>()
-          .on('start', dragstarted)
-          .on('drag', dragged)
-          .on('end', dragended) as any
-      )
-      .on('click', (event: MouseEvent) => {
-        event.stopPropagation();
+      .on('mouseout', function(event: any, d: any) {
+        d3.select(this)
+          .attr('r', Math.min(Math.sqrt(d.value) + 3, 22))
+          .attr('stroke-width', 2.5)
+          .attr('filter', 'drop-shadow(0 4px 6px rgba(0, 0, 0, 0.1))');
       });
 
-    nodes.append('title').text((d: Node) => d.label);
-
-    const labels = nodesGroup
-      .selectAll('text')
-      .data(graph.nodes)
+    // Labels
+    const labelGroup = g.append('g').attr('class', 'labels');
+    
+    const labelElements = labelGroup
+      .selectAll('g.label')
+      .data((graph.nodes as any) as any, (d: any) => d.id)
       .enter()
-      .append('text')
-      .text((d: Node) => d.label)
-      .attr('font-size', 10)
-      .attr('dx', 14)
-      .attr('dy', 4)
+      .append('g')
+      .attr('class', 'label')
       .attr('pointer-events', 'none')
-      .attr('fill', '#334155');
+      .attr('font-family', 'system-ui, -apple-system, sans-serif')
+      .attr('font-weight', '600')
+      .attr('font-size', '11px')
+      .attr('fill', '#475569');
+
+    labelElements.append('rect')
+      .attr('x', -4)
+      .attr('y', -14)
+      .attr('rx', 4)
+      .attr('ry', 4)
+      .attr('fill', '#ffffff')
+      .attr('stroke', '#cbd5e1')
+      .attr('stroke-width', 1);
+
+    labelElements.append('text')
+      .text((d: any) => d.label)
+      .attr('dx', 2)
+      .attr('dy', -4)
+      .attr('text-anchor', 'start')
+      .attr('pointer-events', 'none');
 
     simulation.on('tick', () => {
       links
@@ -132,27 +220,9 @@ export default function RiskGraphVisualization({
         .attr('x2', (d: any) => d.target.x)
         .attr('y2', (d: any) => d.target.y);
 
-      nodes.attr('cx', (d: any) => d.x).attr('cy', (d: any) => d.y);
-
-      labels.attr('x', (d: any) => d.x).attr('y', (d: any) => d.y);
+      nodeElements.attr('transform', (d: any) => `translate(${d.x},${d.y})`);
+      labelElements.attr('transform', (d: any) => `translate(${d.x + 14},${d.y + 4})`);
     });
-
-    function dragstarted(event: d3.D3DragEvent<SVGCircleElement, Node, any>, d: Node & d3.SimulationNodeDatum) {
-      if (!event.active) simulation.alphaTarget(0.3).restart();
-      d.fx = d.x;
-      d.fy = d.y;
-    }
-
-    function dragged(event: d3.D3DragEvent<SVGCircleElement, Node, any>, d: Node & d3.SimulationNodeDatum) {
-      d.fx = event.x;
-      d.fy = event.y;
-    }
-
-    function dragended(event: d3.D3DragEvent<SVGCircleElement, Node, any>, d: Node & d3.SimulationNodeDatum) {
-      if (!event.active) simulation.alphaTarget(0);
-      d.fx = null;
-      d.fy = null;
-    }
 
     return () => {
       simulation.stop();
@@ -161,12 +231,10 @@ export default function RiskGraphVisualization({
 
   return (
     <div className="w-full relative" style={{ height }}>
-      <svg ref={svgRef} className="w-full h-full bg-white rounded-lg border border-slate-200" />
-      {graph && (
-        <div className="absolute bottom-2 left-2 bg-white/90 backdrop-blur-sm text-xs text-slate-600 px-2 py-1 rounded border border-slate-200">
-          {graph.nodes.length} nodes · {graph.links.length} links
-        </div>
-      )}
+      <svg ref={svgRef} className="w-full h-full bg-gradient-to-br from-slate-50 to-blue-50 rounded-2xl border border-slate-200 shadow-sm" />
+      <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur-sm text-xs font-medium text-slate-600 px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
+        {graph ? `${graph.nodes.length} nodes · ${graph.links.length} links` : ''}
+      </div>
     </div>
   );
 }

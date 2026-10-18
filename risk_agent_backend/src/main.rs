@@ -4,6 +4,7 @@ mod agent;
 mod error;
 mod graph;
 mod handlers;
+mod ingestion;
 mod mcp;
 mod state;
 
@@ -77,6 +78,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             get(handlers::investigations::retrieve_memory),
         )
         .route("/api/trace-wallet", post(handlers::wallet::trace_wallet))
+        .route(
+            "/api/ingest-wallet",
+            post(handlers::ingestion::ingest_wallet_handler),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state);
 

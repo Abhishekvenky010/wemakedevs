@@ -3,6 +3,7 @@ use futures::TryStreamExt;
 use std::sync::Arc;
 
 use crate::error::api_error;
+use crate::graph::provenance::{DataSource, PROP_DATA_SOURCE};
 use crate::state::AppState;
 
 pub async fn save_investigation(
@@ -18,7 +19,8 @@ pub async fn save_investigation(
             finding: 'Circular transfer pattern',
             confidence: 0.65,
             created_at: timestamp(),
-            status: 'needs_review'
+            status: 'needs_review',
+            data_source: 'demo'
         })
         CREATE (i)-[:INVOLVES]->(w)
         RETURN i.id AS id,
@@ -58,22 +60,40 @@ pub async fn save_investigation(
 // Returns saved investigations from FalkorDB.
 pub async fn list_investigations(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    let data_source = DataSource::from_request(
+        query
+            .get("data_source")
+            .map(String::as_str)
+            .unwrap_or("real"),
+    );
+    let source = data_source.as_investigation_value();
     let mut graph = state.falkor_client.select_graph("defi_risk");
 
-    let query = r#"
+    let graph_query = format!(
+        r#"
         MATCH (i:Investigation)
+        WHERE i.{data_source_prop} = $data_source
          RETURN
             coalesce(i.id, 'unknown') AS id,
             coalesce(i.finding, 'Unknown finding') AS finding,
             coalesce(i.confidence, 0.0) AS confidence,
             coalesce(i.created_at, 0) AS created_at,
-            coalesce(i.status, 'needs_review') AS status
+            coalesce(i.status, 'needs_review') AS status,
+            coalesce(i.data_source, 'unknown') AS data_source
         ORDER BY i.created_at DESC
         LIMIT 50
-    "#;
+    "#,
+        data_source_prop = PROP_DATA_SOURCE
+    );
 
-    let mut result = graph.ro_query(query).execute().await.map_err(api_error)?;
+    let mut result = graph
+        .ro_query(&graph_query)
+        .with_param("data_source", source.to_string())
+        .execute()
+        .await
+        .map_err(api_error)?;
 
     let mut investigations = Vec::new();
 
@@ -83,13 +103,15 @@ pub async fn list_investigations(
         let confidence: Option<f64> = row.try_get("confidence").map_err(api_error)?;
         let created_at: i64 = row.try_get("created_at").map_err(api_error)?;
         let status: String = row.try_get("status").map_err(api_error)?;
+        let data_source: String = row.try_get("data_source").map_err(api_error)?;
 
         investigations.push(serde_json::json!({
             "id": id,
             "finding": finding,
             "confidence": confidence,
             "created_at": created_at,
-            "status": status
+            "status": status,
+            "data_source": data_source,
         }));
     }
 
@@ -102,16 +124,28 @@ pub async fn list_investigations(
 
 pub async fn retrieve_memory(
     State(state): State<Arc<AppState>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)> {
+    let data_source = DataSource::from_request(
+        query
+            .get("data_source")
+            .map(String::as_str)
+            .unwrap_or("live"),
+    );
+
+    let source = data_source.as_investigation_value();
+    let edge_filter = data_source.edge_filter();
+
     let mut graph = state.falkor_client.select_graph("defi_risk");
 
-    let query = r#"
-        MATCH path =
+    let path_query = format!(
+        r#"MATCH path =
             (start:Wallet)-[:TRANSFERRED_TO*3..6]->(start)
+        WHERE ALL(r IN relationships(path) WHERE {edge_filter})
         WITH collect(DISTINCT start.address) AS cycle_wallets
         UNWIND cycle_wallets AS wallet_address
         MATCH (i:Investigation)-[:INVOLVES]->(w:Wallet)
-        WHERE w.address = wallet_address
+        WHERE w.address = wallet_address AND i.{data_source_prop} = $data_source
         WITH
             i,
             collect(DISTINCT w.address) AS matched_wallets
@@ -125,10 +159,17 @@ pub async fn retrieve_memory(
             i.report AS report,
             i.graph_evidence_json AS graph_evidence_json
         ORDER BY created_at DESC
-        LIMIT 50
-    "#;
+        LIMIT 50"#,
+        data_source_prop = PROP_DATA_SOURCE,
+        edge_filter = edge_filter
+    );
 
-    let mut result = graph.ro_query(query).execute().await.map_err(api_error)?;
+    let mut result = graph
+        .ro_query(&path_query)
+        .with_param("data_source", source.to_string())
+        .execute()
+        .await
+        .map_err(api_error)?;
 
     let mut memories = Vec::new();
 
@@ -167,6 +208,7 @@ pub async fn retrieve_memory(
     Ok(Json(serde_json::json!({
         "status": "success",
         "count": memories.len(),
+        "data_source": source.to_string(),
         "memories": memories
     })))
 }

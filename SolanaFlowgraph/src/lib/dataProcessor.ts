@@ -1,22 +1,55 @@
 import { Connection, PublicKey, ConfirmedSignatureInfo } from '@solana/web3.js';
 
 // Types for our graph visualization
+export interface NodeStyle {
+  color?: string;
+  borderColor?: string;
+  borderWidth?: number;
+  opacity?: number;
+  shadow?: boolean;
+  gradient?: { from: string; to: string };
+}
+
 export interface Node {
   id: string;
   group: number;
   label: string;
   value: number;
+  style?: NodeStyle;
+  [key: string]: unknown;
+}
+
+export interface LinkStyle {
+  color?: string;
+  width?: number;
+  opacity?: number;
+  dasharray?: string;
+  arrow?: boolean;
+  arrowColor?: string;
+  arrowSize?: number;
 }
 
 export interface Link {
   source: string;
   target: string;
   value: number;
+  style?: LinkStyle;
+  [key: string]: unknown;
+}
+
+export interface GraphStyle {
+  backgroundColor?: string;
+  linkDistance?: number;
+  nodeRepulsion?: number;
+  fontSize?: number;
+  fontFamily?: string;
+  animationDuration?: number;
 }
 
 export interface Graph {
   nodes: Node[];
   links: Link[];
+  style?: GraphStyle;
 }
 
 // Process transactions into a graph structure
@@ -28,7 +61,7 @@ export async function processTransactions(
     // Try multiple RPC endpoints in case one fails
     const rpcEndpoints = [
       'https://api.mainnet-beta.solana.com',
-      'https://solana-mainnet.g.alchemy.com/v2/demo', // Alchemy demo endpoint
+      'https://mainnet.helius-rpc.com/?api-key=c8a4b708-da1b-4f41-bcb2-57f1ef5537a6', // Alchemy demo endpoint
       'https://rpc.ankr.com/solana', // Ankr public endpoint
       'https://solana-api.projectserum.com' // Project Serum endpoint
     ];
@@ -160,33 +193,6 @@ export async function processTransactions(
   }
 }
 
-// Function to process the mock Excel data
-export function processMockData(): Graph {
-  // For now, return static mock data
-  // This will be replaced with actual Excel data processing
-  return {
-    nodes: [
-      { id: "1", group: 1, label: "Wallet A", value: 100 },
-      { id: "2", group: 1, label: "Wallet B", value: 80 },
-      { id: "3", group: 2, label: "Smart Contract X", value: 150 },
-      { id: "4", group: 3, label: "DEX Protocol", value: 200 },
-      { id: "5", group: 1, label: "Wallet C", value: 60 },
-      { id: "6", group: 1, label: "Wallet D", value: 50 },
-      { id: "7", group: 2, label: "NFT Marketplace", value: 180 },
-    ],
-    links: [
-      { source: "1", target: "3", value: 30 },
-      { source: "1", target: "4", value: 20 },
-      { source: "2", target: "4", value: 25 },
-      { source: "3", target: "4", value: 40 },
-      { source: "4", target: "5", value: 15 },
-      { source: "5", target: "6", value: 10 },
-      { source: "6", target: "7", value: 35 },
-      { source: "1", target: "7", value: 20 },
-    ]
-  };
-}
-
 // Process transactions using Solscan API instead of direct RPC connections
 export async function processSolscanTransactions(
   walletAddress: string,
@@ -253,12 +259,9 @@ export async function processSolscanTransactions(
       }
     }
     
-    // Use mock data as fallback if all attempts fail
     if (!Array.isArray(transactions) || transactions.length === 0) {
-      console.log('Unable to fetch transactions from Solscan. Generating mock transaction data for visualization...');
-      // Return mock data that visually represents what we'd expect
-      const mockData = generateMockTransactionsForWallet(walletAddress);
-      return mockData;
+      console.log('Unable to fetch transactions from Solscan. No graph data available.');
+      return { nodes: [], links: [] };
     }
     
     console.log(`Found ${transactions.length} transactions on Solscan`);
@@ -347,10 +350,9 @@ export async function processSolscanTransactions(
       }
     }
     
-    // If we couldn't extract meaningful data, use mock data
     if (nodesMap.size <= 1) {
-      console.log('Could not extract meaningful data from transactions. Using mock data instead.');
-      return generateMockTransactionsForWallet(walletAddress);
+      console.log('Could not extract meaningful data from transactions.');
+      return { nodes: [], links: [] };
     }
     
     console.log(`Created graph with ${nodesMap.size} nodes and ${links.length} links from Solscan data`);
@@ -362,96 +364,6 @@ export async function processSolscanTransactions(
     };
   } catch (error) {
     console.error('Error processing Solscan transactions:', error);
-    // Use mock data as fallback
-    return generateMockTransactionsForWallet(walletAddress);
+    return { nodes: [], links: [] };
   }
 }
-
-// Generate mock transaction data for a wallet to demonstrate visualization
-function generateMockTransactionsForWallet(walletAddress: string): Graph {
-  // Create nodes map
-  const nodes: Node[] = [];
-  const links: Link[] = [];
-  
-  // Add the main wallet
-  nodes.push({
-    id: walletAddress,
-    group: 1,
-    label: `Wallet ${walletAddress.slice(0, 4)}...${walletAddress.slice(-4)}`,
-    value: 100,
-  });
-  
-  // Add some mock program interactions (common Solana programs)
-  const programs = [
-    { id: '11111111111111111111111111111111', name: 'System Program' },
-    { id: 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA', name: 'Token Program' },
-    { id: 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL', name: 'Associated Token' },
-    { id: 'JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4', name: 'Jupiter Swap' }
-  ];
-  
-  // Add programs
-  programs.forEach(program => {
-    nodes.push({
-      id: program.id,
-      group: 2,
-      label: `Program: ${program.name}`,
-      value: 150,
-    });
-    
-    links.push({
-      source: walletAddress,
-      target: program.id,
-      value: 10,
-    });
-  });
-  
-  // Add some mock token interactions
-  const tokens = [
-    { id: 'So11111111111111111111111111111111111111112', name: 'SOL' },
-    { id: 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', name: 'USDC' },
-  ];
-  
-  tokens.forEach(token => {
-    nodes.push({
-      id: token.id,
-      group: 3,
-      label: `Token: ${token.name}`,
-      value: 120,
-    });
-    
-    links.push({
-      source: walletAddress,
-      target: token.id,
-      value: 8,
-    });
-  });
-  
-  // Add some mock wallet interactions
-  for (let i = 1; i <= 5; i++) {
-    const randomWalletId = `MockWallet${i}${Math.random().toString(36).substring(5)}`;
-    nodes.push({
-      id: randomWalletId,
-      group: 1,
-      label: `Wallet ${randomWalletId.slice(0, 4)}...${randomWalletId.slice(-4)}`,
-      value: 80,
-    });
-    
-    links.push({
-      source: walletAddress,
-      target: randomWalletId,
-      value: 5,
-    });
-    
-    // Add some wallet-to-wallet interactions for visual complexity
-    if (i > 1) {
-      const previousWalletId = nodes[nodes.length - 1].id;
-      links.push({
-        source: randomWalletId,
-        target: previousWalletId,
-        value: 3,
-      });
-    }
-  }
-  
-  return { nodes, links };
-} 
