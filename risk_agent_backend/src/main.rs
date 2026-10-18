@@ -85,9 +85,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(CorsLayer::permissive())
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
+    let port = env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
 
-    eprintln!("Axum backend listening on http://localhost:8080");
+    eprintln!("Axum backend listening on http://0.0.0.0:{}", port);
 
     axum::serve(listener, app).await?;
 
