@@ -5,7 +5,7 @@
       "root": "risk_agent_backend",
       "runtime": "rust"
     },
-    "solanaflowgraph": {
+    "agentx": {
       "root": "SolanaFlowgraph",
       "framework": "nextjs"
     }

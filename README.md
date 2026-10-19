@@ -1,4 +1,4 @@
-# WEMAKEDEVS - DeFi Risk Agent
+# AgentX - DeFi Risk Agent
 
 
 
@@ -24,9 +24,9 @@ The graph module (`risk_agent_backend/src/graph/`) provides the analytical backb
 
 ### MCP-Driven Tool Selection
 
-All investigative actions are mediated through Model Context Protocol (MCP):
+The agent's investigative tool calls are mediated through Model Context Protocol (MCP):
 
-- **Tool Discovery** – The `tools.rs` module defines approved read-only tools (`trace_wallet`, `find_related_cases`).
+- **Tool Discovery** – The `tools.rs` module defines approved read-only tools (`trace_wallet`, `find_related_cases`, `compare_investigations`).
 - **Dynamic Invocation** – The orchestrator selects and executes tools based on the current state and available data sources.
 - **Fallback Reporting** – When tools fail or return incomplete results, a structured fallback report is generated from graph evidence.
 
@@ -63,12 +63,13 @@ paths matching the requested `data_source`.
 
 ```
 1. Receive wallet address + data source (real/demo)
-2. Trace wallet → detect cycles
-3. Find related cases → historical investigations
-4. Compare paths → recurrence/novelty analysis
-5. Deterministic action rule → flag_for_review or no_action
-6. Create/update investigation case when rule is satisfied
-7. Generate explainable report with action outcome
+2. Ingest wallet transfers → persist edges
+3. Trace wallet → detect cycles + load persisted transfer edges for the graph
+4. Find related cases → historical investigations
+5. Compare paths → recurrence/novelty analysis
+6. Deterministic action rule → flag_for_review or no_action
+7. Create/update investigation case when rule is satisfied
+8. Generate explainable report with action outcome
 ```
 
 ## Graph Algorithms
@@ -83,21 +84,33 @@ Compares current and historical paths, computing:
 - **New cycles** – Novel cycle structures emerging now
 - **Novelty status** – Indicates whether the activity represents a new threat pattern
 
+### Persisted Transfer Graph
+The risk report also returns `transaction_graph`: persisted `TRANSFERRED_TO`
+edges in the investigated wallet's bounded neighborhood, scoped to the depth
+actually reached by ingestion (1–3 hops). This is deliberately separate from
+cycle detection. Cycle paths are a strict subset of the transfer graph and are
+the only input to the deterministic action rule. The UI renders persisted
+transfers even when they do not form a cycle, so normal on-chain activity is not
+mistaken for missing evidence.
+
 ## Tool Integration
 
 | Tool | Purpose | Data Source |
 |------|---------|-------------|
 | `trace_wallet` | Detect circular-transfer paths | Real/Demo mainnet |
 | `find_related_cases` | Locate historical investigations | Falkor DB |
+| `compare_investigations` | Compare current cycles with historical evidence | Falkor DB |
 
-Both tools are invoked through MCP and their results feed directly into the graph comparison engine.
+These tools are invoked through MCP and their results feed directly into the graph comparison engine.
 ## Explainability
 
 All reports include:
 
 - **Cycle Roots** – Identified circular paths with hop counts
+- **Persisted Transfers** – Real/demo transfer edges rendered in the graph even when no cycle exists
 - **Historical Context** – Related cases with findings and confidence scores
 - **Novelty Assessment** – Whether the activity is new or recurring
+- **Investigation Trace** – Ordered MCP tool calls, their effective arguments, status, and result counts
 - **Limitations** – Clear statements about evidence quality and incompleteness
 - **Action Outcome** – `action_taken` (`flag_for_review` or `no_action`), `action_reason`,
   `evidence_summary`, and `case_id` when a case was created or updated
@@ -142,7 +155,13 @@ wemakedevs/
 │   │   └── main.rs             # Entry point
 │   ├── Cargo.toml              # Dependencies (axum, falkordb, remcp, etc.)
 │   └── README.md               # Backend-specific documentation
-├── SolanaFlowgraph/            # Graph visualization component
+├── SolanaFlowgraph/            # Next.js graph visualization frontend
+│   ├── app/                    # Route shells (/risk, /demo) and layout
+│   ├── src/components/ui/      # Reusable design-system primitives
+│   ├── src/components/layout/  # Header and page shell
+│   ├── src/components/risk/    # Report, graph, trace, and form components
+│   ├── src/components/demo/    # Demo seed launcher
+│   └── src/lib/                # API client and graph types
 └── README.md                   # Global project documentation
 ```
 
@@ -239,6 +258,20 @@ The frontend is designed to consume the backend API. Follow these steps:
   "data_source": "real",
   "finding": "Circular transfer pattern detected",
   "graph_evidence": [...],
+  "transaction_graph": [
+    {
+      "source": "...",
+      "destination": "...",
+      "direction": "incoming",
+      "signature": "...",
+      "amount": 0.25,
+      "mint": "SOL",
+      "slot": 123,
+      "block_time": 1700000000,
+      "transfer_type": "NATIVE_SOL",
+      "success": true
+    }
+  ],
   "evidence_summary": "1 circular transfer path(s) detected involving 3 unique wallet(s).",
   "action_taken": "flag_for_review",
   "action_reason": "Circular transfer pattern detected in graph evidence; flagged for human review. ...",
@@ -247,6 +280,15 @@ The frontend is designed to consume the backend API. Follow these steps:
   "cycle_participant_count": 3,
   "investigation_diff": { ... },
   "structured_report": { ... },
+  "investigation_trace": [
+    {
+      "round": 0,
+      "tool": "trace_wallet",
+      "arguments": { "address": "...", "data_source": "real" },
+      "status": "success",
+      "result_summary": { "status": "success", "cycles_count": 1 }
+    }
+  ],
   "ai_risk_report": "...",
   "coverage": { ... }
 }

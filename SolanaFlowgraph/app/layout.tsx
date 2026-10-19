@@ -2,8 +2,9 @@ import './globals.css';
 import type { Metadata } from 'next';
 
 export const metadata: Metadata = {
-  title: 'SolanaFlowGraph - Visualize Solana Transactions',
-  description: 'Visualize and analyze Solana blockchain transactions with interactive graph visualizations',
+  title: 'AgentX — Wallet risk intelligence',
+  description:
+    'Investigate Solana wallets with graph-backed circular-transfer detection, explainable evidence, and deterministic risk actions.',
 };
 
 export default function RootLayout({
@@ -13,7 +14,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en">
-      <body>
+      <body className="bg-slate-50">
         {children}
       </body>
     </html>

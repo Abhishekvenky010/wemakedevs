@@ -101,8 +101,10 @@ pub async fn find_existing_investigation(
             .map_err(|e| e.to_string())?;
         let created_at: i64 = row.try_get("created_at").map_err(|e| e.to_string())?;
         let status: String = row.try_get("status").map_err(|e| e.to_string())?;
-        let action_taken: Option<String> = row.try_get("action_taken").map_err(|e| e.to_string())?;
-        let action_reason: Option<String> = row.try_get("action_reason").map_err(|e| e.to_string())?;
+        let action_taken: Option<String> =
+            row.try_get("action_taken").map_err(|e| e.to_string())?;
+        let action_reason: Option<String> =
+            row.try_get("action_reason").map_err(|e| e.to_string())?;
 
         return Ok(Some(json!({
             "id": id,
@@ -389,10 +391,7 @@ mod tests {
     #[test]
     fn evaluate_action_rule_no_action_when_no_cycles() {
         let cycles: Vec<Value> = vec![];
-        assert_eq!(
-            evaluate_action_rule(&cycles),
-            InvestigationAction::NoAction
-        );
+        assert_eq!(evaluate_action_rule(&cycles), InvestigationAction::NoAction);
     }
 
     #[test]
@@ -432,14 +431,8 @@ mod tests {
 
     #[test]
     fn real_and_synthetic_data_sources_remain_distinct() {
-        assert_eq!(
-            DataSource::from_request("real"),
-            DataSource::Real
-        );
-        assert_eq!(
-            DataSource::from_request("demo"),
-            DataSource::Synthetic
-        );
+        assert_eq!(DataSource::from_request("real"), DataSource::Real);
+        assert_eq!(DataSource::from_request("demo"), DataSource::Synthetic);
         assert_ne!(
             DataSource::Real.as_investigation_value(),
             DataSource::Synthetic.as_investigation_value()
@@ -450,7 +443,7 @@ mod tests {
     fn real_edge_filter_excludes_demo() {
         assert_eq!(
             DataSource::Real.edge_filter(),
-            "r.source = 'real' AND r.demo_id IS NULL"
+            "(r.source = 'real' AND r.demo_id IS NULL)"
         );
     }
 
@@ -458,7 +451,7 @@ mod tests {
     fn synthetic_edge_filter_excludes_real() {
         assert_eq!(
             DataSource::Synthetic.edge_filter(),
-            "r.source = 'demo' OR r.demo_id IS NOT NULL"
+            "(r.source = 'demo' OR r.demo_id IS NOT NULL)"
         );
     }
 }

@@ -1,4 +1,5 @@
-import type { Graph, Node, Link, GraphStyle, NodeStyle, LinkStyle } from "@/lib/dataProcessor";
+import type { Graph, Node, Link, GraphStyle, NodeStyle } from "@/lib/graph/types";
+import type { TransactionEdge } from "@/lib/risk/api";
 
 export interface GraphEvidence {
   wallet: string;
@@ -36,9 +37,9 @@ export const DEFAULT_RISK_THEME: RiskGraphTheme = {
   colors: {
     low: "#10b981",      // Emerald 500 - Safe
     medium: "#f59e0b",    // Amber 500 - Moderate Risk
-    high: "#ef4444",     // Red 500 - High Risk
-    default: "#3b82f6",   // Blue 500 - Default
-    background: "#0f172a", // Slate 900 - Dark background
+    high: "#e11d48",     // Rose 600 - High Risk
+    default: "#4f46e5",   // Indigo 600 - Default
+    background: "#f8fafc", // Slate 50 - Light background
     linkDefault: "#94a3b8", // Slate 400 - Light gray links
     linkHighFrequency: "#fbbf24", // Amber 300 - Highlight high-frequency paths
   },
@@ -64,81 +65,144 @@ export interface RiskNodeStyle extends NodeStyle {
 }
 
 /**
- * Converts risk evidence into a visually-styled graph representation.
- * Nodes are colored and sized by risk level.
- * Links are styled with arrows and frequency-based thickness.
+ * Converts risk evidence and persisted transactions into a visually-styled
+ * graph representation.
+ *
+ * - Cycle paths are rendered as red, emphasised edges.
+ * - Persisted real transfers are rendered as muted slate edges, even when they
+ *   do not form a cycle.
+ * - The investigated wallet is blue; cycle participants are red; other
+ *   counterparties are neutral.
  */
 export function riskEvidenceToGraph(
   evidence: GraphEvidence[],
+  transactions: TransactionEdge[] = [],
+  rootAddress?: string,
   theme: RiskGraphTheme = DEFAULT_RISK_THEME
 ): Graph {
   const nodes = new Map<string, Node>();
   const links = new Map<string, Link>();
+  const cycleWallets = new Set<string>();
 
-  // Track how many paths each wallet appears in
-  const walletFrequency = new Map<string, number>();
-  
   for (const item of evidence) {
-    const path = item.path_wallets;
-    for (const wallet of path) {
-      walletFrequency.set(wallet, (walletFrequency.get(wallet) || 0) + 1);
+    for (const wallet of item.path_wallets ?? []) {
+      cycleWallets.add(wallet);
     }
   }
 
-  for (const item of evidence) {
-    const path = item.path_wallets;
+  const ensureNode = (address: string) => {
+    if (!address || nodes.has(address)) return;
 
-    // Add each wallet as a node, even if it appears in multiple paths
-    for (const wallet of path) {
-      if (!nodes.has(wallet)) {
-        const riskLevel = getRiskLevel(wallet);
-        const nodeStyle: RiskNodeStyle = getNodeStyle(riskLevel, wallet, theme);
-        const frequency = walletFrequency.get(wallet) || 1;
-        
-        nodes.set(wallet, {
-          id: wallet,
-          group: getGroup(riskLevel),
-          label: `${wallet.slice(0, 6)}...${wallet.slice(-4)}`,
-          value: getNodeSize(frequency, theme),
-          style: nodeStyle,
-          tooltip: `Address: ${wallet}\nRisk: ${riskLevel}\nIn ${frequency} path(s)\nMax hop: ${item.hop_count}`,
-          frequency,
-          riskLevel,
-        });
-      }
+    const role = getNodeRole(address, cycleWallets, rootAddress);
+    const style = getRoleStyle(role, theme);
+
+    nodes.set(address, {
+      id: address,
+      group: role === "cycle" ? 3 : role === "root" ? 2 : 1,
+      label: `${address.slice(0, 6)}...${address.slice(-4)}`,
+      value: role === "cycle" ? 90 : role === "root" ? 72 : 42,
+      style,
+      role,
+      riskLevel: role === "cycle" ? "high" : "default",
+      cycleParticipant: role === "cycle",
+      isRoot: role === "root",
+      tooltip: nodeTooltip(address, role, address === rootAddress),
+    });
+  };
+
+  // Add persisted transfers first. They are the actual on-chain evidence and
+  // are shown even when no cycle exists.
+  for (const tx of transactions) {
+    ensureNode(tx.source);
+    ensureNode(tx.destination);
+
+    const key = `${tx.source}->${tx.destination}`;
+    const existing = links.get(key);
+
+    if (existing) {
+      existing.value += 1;
+      existing.transactionCount = Number(existing.transactionCount ?? 1) + 1;
+      existing.tooltip = buildTransactionTooltip(
+        tx,
+        Number(existing.transactionCount)
+      );
+      continue;
     }
 
-    // Create directed links for every consecutive pair in the path
+    links.set(key, {
+      source: tx.source,
+      target: tx.destination,
+      value: 1,
+      kind: "transaction",
+      transactionCount: 1,
+      tooltip: buildTransactionTooltip(tx, 1),
+      style: {
+        color: "#94a3b8",
+        width: 1.8,
+        opacity: 0.6,
+        arrow: true,
+        arrowColor: "#94a3b8",
+      },
+    });
+  }
+
+  // Overlay detected cycles on top of the transaction graph.
+  for (const item of evidence) {
+    const path = item.path_wallets ?? [];
+    for (const wallet of path) ensureNode(wallet);
+
     for (let i = 0; i < path.length - 1; i++) {
       const source = path[i];
       const target = path[i + 1];
-
       if (!source || !target) continue;
 
       const key = `${source}->${target}`;
+      const existing = links.get(key);
 
-      if (!links.has(key)) {
-        const linkStyle: LinkStyle = {
-          color: theme.colors.linkDefault,
-          width: 2,
-          opacity: 0.7,
+      if (existing) {
+        existing.kind = "cycle";
+        existing.value += 1;
+        existing.cycleCount = Number(existing.cycleCount ?? 0) + 1;
+        existing.style = {
+          color: "#e11d48",
+          width: Math.min(8, 3 + existing.value),
+          opacity: 1,
           arrow: true,
-          arrowColor: theme.colors.linkDefault,
-          arrowSize: 6,
+          arrowColor: "#e11d48",
         };
-        links.set(key, { source, target, value: 2, style: linkStyle });
+        existing.tooltip = `Detected cycle edge\n${source} → ${target}\nSeen in ${existing.cycleCount} returned cycle path(s)`;
       } else {
-        // Increase thickness and color for high-frequency paths
-        const existingLink = links.get(key)!;
-        existingLink.value += 1;
-        if (existingLink.style) {
-          existingLink.style.width = Math.min(8, 2 + existingLink.value);
-          existingLink.style.color = theme.colors.linkHighFrequency;
-          existingLink.style.arrowColor = theme.colors.linkHighFrequency;
-          existingLink.style.opacity = Math.min(1, 0.7 + existingLink.value * 0.1);
-        }
+        links.set(key, {
+          source,
+          target,
+          value: 1,
+          kind: "cycle",
+          cycleCount: 1,
+          tooltip: `Detected cycle edge\n${source} → ${target}`,
+          style: {
+            color: "#e11d48",
+            width: 3,
+            opacity: 1,
+            arrow: true,
+            arrowColor: "#e11d48",
+          },
+        });
       }
     }
+  }
+
+  // Recompute roles after all cycle paths are known. This matters when a node
+  // was first added from a transaction and later turned out to be in a cycle.
+  for (const node of nodes.values()) {
+    const role = getNodeRole(node.id, cycleWallets, rootAddress);
+    node.role = role;
+    node.group = role === "cycle" ? 3 : role === "root" ? 2 : 1;
+    node.riskLevel = role === "cycle" ? "high" : "default";
+    node.style = getRoleStyle(role, theme);
+    node.value = role === "cycle" ? 90 : role === "root" ? 72 : 42;
+    node.cycleParticipant = role === "cycle";
+    node.isRoot = role === "root";
+    node.tooltip = nodeTooltip(node.id, role, node.id === rootAddress);
   }
 
   const graphStyle: GraphStyle = {
@@ -155,195 +219,103 @@ export function riskEvidenceToGraph(
   };
 }
 
-/**
- * Generates visual styling for risk nodes based on risk level.
- */
-function getNodeStyle(riskLevel: string, _wallet: string, theme: RiskGraphTheme): RiskNodeStyle {
-  const colors = {
-    low: theme.colors.low,
-    medium: theme.colors.medium,
-    high: theme.colors.high,
-  }[riskLevel] || theme.colors.default;
+type NodeRole = "cycle" | "root" | "counterparty";
 
-  const borderColor = getBorderColor(riskLevel, theme);
-  const borderWidth = theme.sizes.borderWidth;
+function getNodeRole(
+  address: string,
+  cycleWallets: Set<string>,
+  rootAddress?: string
+): NodeRole {
+  if (cycleWallets.has(address)) return "cycle";
+  if (address === rootAddress) return "root";
+  return "counterparty";
+}
 
-  const style: RiskNodeStyle = {
-    color: colors,
-    borderColor,
-    borderWidth,
-    opacity: 1,
+function nodeTooltip(address: string, role: NodeRole, isRoot: boolean): string {
+  const roleLabel =
+    role === "cycle"
+      ? isRoot
+        ? "investigated wallet (cycle participant)"
+        : "cycle participant"
+      : role === "root"
+        ? "investigated wallet"
+        : "transfer counterparty";
+
+  return `Address: ${address}\nRole: ${roleLabel}`;
+}
+
+function getRoleStyle(role: NodeRole, theme: RiskGraphTheme): RiskNodeStyle {
+  if (role === "cycle") {
+    return {
+      color: "#e11d48",
+      borderColor: "#be123c",
+      borderWidth: 3,
+      opacity: 1,
+      shadow: true,
+      fontSize: theme.sizes.fontSize,
+      shape: "diamond",
+      pulse: true,
+    };
+  }
+
+  if (role === "root") {
+    return {
+      color: "#4f46e5",
+      borderColor: "#3730a3",
+      borderWidth: 3,
+      opacity: 1,
+      shadow: true,
+      fontSize: theme.sizes.fontSize,
+      shape: "circle",
+    };
+  }
+
+  return {
+    color: "#64748b",
+    borderColor: "#475569",
+    borderWidth: 2,
+    opacity: 0.95,
     shadow: true,
     fontSize: theme.sizes.fontSize,
-    shape: getShape(riskLevel),
-    gradient: {
-      from: colors,
-      to: adjustBrightness(colors, -20),
-    },
-  };
-
-  // Add pulse animation for high-risk nodes
-  if (riskLevel === "high") {
-    style.pulse = true;
-  }
-
-  return style;
-}
-
-/**
- * Determines border color based on risk level.
- */
-function getBorderColor(riskLevel: string, theme: RiskGraphTheme): string {
-  switch (riskLevel) {
-    case "high":
-      return theme.colors.high;
-    case "medium":
-      return theme.colors.medium;
-    case "low":
-      return theme.colors.low;
-    default:
-      return theme.colors.default;
-  }
-}
-
-/**
- * Maps risk levels to node groups for graph layout.
- */
-function getGroup(riskLevel: string): number {
-  switch (riskLevel) {
-    case "low":
-      return 1;
-    case "medium":
-      return 2;
-    case "high":
-      return 3;
-    default:
-      return 0;
-  }
-}
-
-/**
- * Determines node shape based on risk level.
- * Different shapes aid visual distinction and accessibility.
- */
-function getShape(riskLevel: string): "circle" | "square" | "diamond" | "triangle" {
-  switch (riskLevel) {
-    case "low":
-      return "circle";
-    case "medium":
-      return "square";
-    case "high":
-      return "diamond";
-    default:
-      return "circle";
-  }
-}
-
-/**
- * Calculates node size based on frequency and theme.
- */
-function getNodeSize(frequency: number, theme: RiskGraphTheme): number {
-  return Math.min(
-    theme.sizes.nodeMax,
-    theme.sizes.nodeMin + (frequency - 1) * 15
-  );
-}
-
-/**
- * Adjusts the brightness of a hex color by a given percentage.
- */
-function adjustBrightness(hex: string, percent: number): string {
-  const R = parseInt(hex.slice(1, 3), 16);
-  const G = parseInt(hex.slice(3, 5), 16);
-  const B = parseInt(hex.slice(5, 7), 16);
-
-  const newR = Math.min(255, Math.max(0, R + (R * percent) / 100));
-  const newG = Math.min(255, Math.max(0, G + (G * percent) / 100));
-  const newB = Math.min(255, Math.max(0, B + (B * percent) / 100));
-
-  return `#${newR.toString(16).padStart(2, "0")}${newG.toString(16).padStart(2, "0")}${newB.toString(16).padStart(2, "0")}`;
-}
-
-/**
- * Determines risk level based on wallet identifier characteristics.
- * Longer identifiers are considered lower risk (more established projects).
- * Medium-length identifiers suggest potential risk.
- * Short identifiers may indicate newer/experimental projects.
- */
-function getRiskLevel(wallet: string): string {
-  if (wallet.length >= 10) return "low";
-  if (wallet.length >= 7) return "medium";
-  return "high";
-}
-
-/**
- * Generates a legend object for the graph visualization.
- * This helps users understand color coding.
- */
-function generateLegend(theme: RiskGraphTheme = DEFAULT_RISK_THEME): Record<string, string> {
-  return {
-    low: `Low Risk (${theme.colors.low}) - Established projects`,
-    medium: `Medium Risk (${theme.colors.medium}) - Moderate risk`,
-    high: `High Risk (${theme.colors.high}) - Potential risk`,
-    default: `Default (${theme.colors.default}) - Unknown risk`,
-    links: `Links represent transfer paths; thickness = frequency of appearance`,
+    shape: "circle",
   };
 }
 
-/**
- * Generates a style configuration for interactive graph visualization.
- * Includes hover states, selection states, and transition animations.
- */
-export function getInteractiveGraphConfig(theme: RiskGraphTheme = DEFAULT_RISK_THEME) {
-  return {
-    style: {
-      backgroundColor: theme.colors.background,
-      nodeSize: { min: theme.sizes.nodeMin, max: theme.sizes.nodeMax },
-      fontSize: theme.sizes.fontSize,
-    },
-    interactions: {
-      hover: {
-        node: {
-          scale: 1.2,
-          borderWidth: 4,
-          opacity: 1,
-        },
-        link: {
-          width: 4,
-          opacity: 1,
-        },
-      },
-      select: {
-        node: {
-          scale: 1.3,
-          borderWidth: 6,
-          opacity: 1,
-        },
-      },
-      focus: {
-        opacity: 0.3,
-        highlightConnectedLinks: true,
-      },
-    },
-    transitions: {
-      duration: theme.animation.duration,
-      easing: theme.animation.easing,
-    },
-    layout: {
-      type: "force",
-      linkDistance: 120,
-      nodeRepulsion: 1000,
-      iterations: 300,
-    },
-    labels: {
-      visible: true,
-      fontSize: theme.sizes.fontSize,
-      offset: 12,
-      background: "rgba(0, 0, 0, 0.7)",
-      padding: 4,
-      borderColor: "rgba(255, 255, 255, 0.2)",
-    },
-  };
+function buildTransactionTooltip(tx: TransactionEdge, count: number): string {
+  const directionLabel =
+    tx.direction === "outgoing"
+      ? "outgoing from investigated wallet"
+      : tx.direction === "incoming"
+        ? "incoming to investigated wallet"
+        : "between counterparties";
+
+  const lines = [
+    `${count} transfer${count === 1 ? "" : "s"} ${directionLabel}`,
+    `${tx.source} → ${tx.destination}`,
+    formatAmount(tx.amount, tx.mint),
+    `Signature: ${tx.signature || "unknown"}`,
+  ];
+
+  if (!tx.success) {
+    lines.push("Status: failed transaction");
+  }
+
+  if (tx.block_time) {
+    lines.push(`Block time: ${new Date(tx.block_time * 1000).toISOString()}`);
+  }
+
+  return lines.join("\n");
 }
 
-export { generateLegend };
+function formatAmount(amount: number, mint: string): string {
+  if (!Number.isFinite(amount)) return mint || "unknown amount";
+
+  const formatted =
+    amount >= 1
+      ? amount.toLocaleString(undefined, { maximumFractionDigits: 4 })
+      : amount.toPrecision(4);
+
+  return `${formatted} ${mint || ""}`.trim();
+}
+
+

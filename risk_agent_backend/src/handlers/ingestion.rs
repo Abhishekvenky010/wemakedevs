@@ -253,8 +253,10 @@ mod handler_tests {
                     };
                     let mut content_length: usize = 0;
                     for line in String::from_utf8_lossy(&leftover[..headers_end]).lines() {
-                        if let Some(rest) = line.strip_prefix("Content-Length:") {
-                            content_length = rest.trim().parse().unwrap_or(0);
+                        if let Some((name, value)) = line.split_once(':') {
+                            if name.eq_ignore_ascii_case("content-length") {
+                                content_length = value.trim().parse().unwrap_or(0);
+                            }
                         }
                     }
                     if leftover.len() < headers_end + content_length {
@@ -442,12 +444,6 @@ mod handler_tests {
         )
         .await;
 
-        // Restore env before any assertions/panics.
-        match previous_rpc {
-            Some(v) => unsafe { env::set_var("SOLANA_RPC_URL", &v) },
-            None => unsafe { env::remove_var("SOLANA_RPC_URL") },
-        }
-
         let (status, body) = match result {
             Ok(Json(body)) => (axum::http::StatusCode::OK, body),
             Err((status, Json(body))) => {
@@ -457,7 +453,6 @@ mod handler_tests {
             }
         };
         assert_eq!(status, axum::http::StatusCode::OK);
-        eprintln!("DEBUG RESPONSE BODY: {body}");
         assert_eq!(body["max_depth"], 1);
         assert_eq!(body["max_depth_reached"], 1);
         assert_eq!(body["data_source"], "real");
@@ -484,7 +479,7 @@ mod handler_tests {
         ));
         queue.lock().unwrap().push_back(http_response(
             "200 OK",
-            &transfer_tx(SIG1, 100, WALLET, CP1),
+            &json!({"jsonrpc": "2.0", "id": 1, "result": transfer_tx(SIG1, 100, WALLET, CP1)}),
         ));
 
         let result_depth0 = ingest_wallet_handler(
@@ -496,6 +491,12 @@ mod handler_tests {
             }),
         )
         .await;
+
+        // Restore env before any assertions/panics.
+        match previous_rpc {
+            Some(v) => unsafe { env::set_var("SOLANA_RPC_URL", &v) },
+            None => unsafe { env::remove_var("SOLANA_RPC_URL") },
+        }
 
         let (status0, body0) = match result_depth0 {
             Ok(Json(body)) => (axum::http::StatusCode::OK, body),

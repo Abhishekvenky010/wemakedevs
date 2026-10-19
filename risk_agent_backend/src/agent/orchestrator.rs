@@ -1,4 +1,5 @@
 use axum::{Json, http::StatusCode};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
@@ -11,6 +12,32 @@ use crate::{
 
 /// Maximum rounds where tools are available, followed by one final text-only round.
 const MAX_TOOL_ROUNDS: usize = 3;
+
+/// Arguments recorded for one MCP tool call. These are the effective arguments
+/// used for the call (the investigation's data source is always enforced).
+#[derive(Debug, Clone, Serialize)]
+pub struct TraceArguments {
+    pub address: String,
+    pub data_source: String,
+}
+
+/// One auditable MCP tool call made by the agent.
+#[derive(Debug, Clone, Serialize)]
+pub struct InvestigationTraceStep {
+    pub round: usize,
+    pub tool: String,
+    pub arguments: TraceArguments,
+    pub status: String,
+    pub result_summary: Value,
+}
+
+/// Result of an agent run: the narrative report plus the tool-call trace used
+/// to produce it. The trace is returned to clients for explainability.
+#[derive(Debug, Clone)]
+pub struct AgentRun {
+    pub report: String,
+    pub trace: Vec<InvestigationTraceStep>,
+}
 
 /// Strip raw tool-call markup from text so it is never presented as the final AI report.
 /// Removes XML-style ``...`` blocks and
@@ -155,6 +182,73 @@ fn build_fallback_report(
     lines.join("\n")
 }
 
+/// Reduce a tool result to the counts and status needed for an audit trail.
+/// Full paths stay in the report evidence; the trace stays small and readable.
+fn summarize_tool_result(result: &Value) -> Value {
+    let mut summary = serde_json::Map::new();
+
+    for key in [
+        "status",
+        "detected_cycles",
+        "cases_found",
+        "current_unique_cycles",
+        "historical_unique_cycles",
+        "historical_cases_checked",
+        "novelty_status",
+        "error",
+    ] {
+        if let Some(value) = result.get(key) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+
+    for key in [
+        "cycles",
+        "cases",
+        "current_cycles",
+        "recurring_cycles",
+        "new_cycles",
+    ] {
+        if let Some(values) = result.get(key).and_then(Value::as_array) {
+            summary.insert(format!("{key}_count"), json!(values.len()));
+        }
+    }
+
+    Value::Object(summary)
+}
+
+/// Build one trace entry from the effective tool arguments and result.
+fn trace_step(
+    round: usize,
+    tool: &str,
+    raw_arguments: &str,
+    data_source: DataSource,
+    result: &Value,
+) -> InvestigationTraceStep {
+    let address = serde_json::from_str::<Value>(raw_arguments)
+        .ok()
+        .as_ref()
+        .and_then(|arguments| arguments.get("address"))
+        .and_then(Value::as_str)
+        .map(|address| address.trim().to_owned())
+        .unwrap_or_default();
+
+    InvestigationTraceStep {
+        round,
+        tool: tool.to_string(),
+        arguments: TraceArguments {
+            address,
+            data_source: data_source.as_investigation_value().to_string(),
+        },
+        status: result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string(),
+        result_summary: summarize_tool_result(result),
+    }
+}
+
 pub async fn run_groq_agent(
     state: &AppState,
     cycles: &[Value],
@@ -162,7 +256,8 @@ pub async fn run_groq_agent(
     comparison: &Value,
     address: &str,
     data_source: DataSource,
-) -> Result<String, (StatusCode, Json<Value>)> {
+    transaction_count: usize,
+) -> Result<AgentRun, (StatusCode, Json<Value>)> {
     let mut seen_cycles = HashSet::<Vec<String>>::new();
 
     let compact_cycles: Vec<Value> = cycles
@@ -235,19 +330,25 @@ pub async fn run_groq_agent(
         "Investigate this DeFi activity for wallet {address} using the supplied evidence. \
          The investigation data source is '{data_source}'. Pass that exact source to graph tools. \
          When wallet addresses are available, use trace_wallet to check \
-         current graph paths and find_related_cases to inspect historical \
-         investigations. Avoid repeating the same lookup. Use no more than \
+         current graph paths, find_related_cases to inspect historical \
+         investigations, and compare_investigations when you need the \
+         recurring/new cycle comparison (it runs trace and history internally). \
+         Avoid repeating the same lookup. Use no more than \
          the available tool-call rounds. Treat graph data as evidence, not \
          proof of wrongdoing. Never invent amounts, timestamps, ownership, \
          or transactions. Distinguish observations, hypotheses, and \
          limitations. Missing historical paths mean a match cannot be verified. \
          If coverage limitations are present, explicitly state them and do not present \
-         the findings as complete or conclude that the wallet is safe.\n\
+         the findings as complete or conclude that the wallet is safe. \
+         {transaction_count} persisted transfer edge(s) are available for this wallet. \
+         These are context, not proof of wrongdoing; do not claim there is no \
+         transaction evidence when this count is greater than zero.\n\
          CURRENT PATHS: {current_paths}\n\
          HISTORICAL CASES: {historical_cases}\n\
          GRAPH COMPARISON: {comparison}",
         address = address,
         data_source = data_source.as_investigation_value(),
+        transaction_count = transaction_count,
         current_paths = serde_json::to_string(&compact_cycles).map_err(api_error)?,
         historical_cases = serde_json::to_string(&compact_memories).map_err(api_error)?,
         comparison = serde_json::to_string(comparison).map_err(api_error)?
@@ -267,13 +368,18 @@ pub async fn run_groq_agent(
         Never present failed tool output as evidence or infer missing facts from it. \
         Clearly state when required evidence could not be retrieved, and qualify \
         conclusions accordingly. Distinguish observed facts from hypotheses; \
-        do not present hypotheses as observed facts."
+        do not present hypotheses as observed facts. \
+        Format the final answer as readable Markdown: short headings such as \
+        '## Summary', '## Evidence', and '## Limitations', with bullet lists \
+        where appropriate. Do not wrap the entire answer in a code block."
         }),
         json!({
             "role": "user",
             "content": user_content
         }),
     ];
+
+    let mut trace: Vec<InvestigationTraceStep> = Vec::new();
 
     let mut mcp_client = crate::agent::mcp_client::McpClient::connect()
         .await
@@ -322,29 +428,38 @@ pub async fn run_groq_agent(
 
             if !sanitized.trim().is_empty() {
                 let _ = mcp_client.close().await;
-                return Ok(sanitized);
+                return Ok(AgentRun {
+                    report: sanitized,
+                    trace,
+                });
             }
 
             // Content was empty or only tool-call markup. Fall through to fallback.
             let _ = mcp_client.close().await;
-            return Ok(build_fallback_report(
-                &compact_cycles,
-                &compact_memories,
-                comparison,
-                address,
-            ));
+            return Ok(AgentRun {
+                report: build_fallback_report(
+                    &compact_cycles,
+                    &compact_memories,
+                    comparison,
+                    address,
+                ),
+                trace,
+            });
         }
 
         // The final round has no tools available. Never execute
         // unexpected tool calls if the provider returns them anyway.
         if round == MAX_TOOL_ROUNDS {
             let _ = mcp_client.close().await;
-            return Ok(build_fallback_report(
-                &compact_cycles,
-                &compact_memories,
-                comparison,
-                address,
-            ));
+            return Ok(AgentRun {
+                report: build_fallback_report(
+                    &compact_cycles,
+                    &compact_memories,
+                    comparison,
+                    address,
+                ),
+                trace,
+            });
         }
 
         // Preserve Groq's assistant message, including tool-call IDs.
@@ -375,6 +490,8 @@ pub async fn run_groq_agent(
 
             let compact_result = compact_tool_result(&result);
 
+            trace.push(trace_step(round, name, arguments, data_source, &result));
+
             messages.push(json!({
                 "role": "tool",
                 "tool_call_id": id,
@@ -385,12 +502,10 @@ pub async fn run_groq_agent(
 
     let _ = mcp_client.close().await;
 
-    Ok(build_fallback_report(
-        &compact_cycles,
-        &compact_memories,
-        comparison,
-        address,
-    ))
+    Ok(AgentRun {
+        report: build_fallback_report(&compact_cycles, &compact_memories, comparison, address),
+        trace,
+    })
 }
 
 /// Shrink tool results before echoing them back into the message history so
@@ -399,8 +514,9 @@ fn compact_tool_result(result: &Value) -> Value {
     let mut out = result.clone();
 
     if let Some(obj) = out.as_object_mut() {
-        // trace_wallet returns a "cycles" array; find_related_cases returns "cases".
-        for key in ["cycles", "cases"] {
+        // trace_wallet returns "cycles"; find_related_cases returns "cases";
+        // compare_investigations returns "current_cycles".
+        for key in ["cycles", "cases", "current_cycles"] {
             if let Some(arr) = obj.get(key).and_then(Value::as_array) {
                 let trimmed: Vec<Value> = arr
                     .iter()
@@ -537,5 +653,53 @@ mod tests {
 
         assert!(report.contains("No circular-transfer paths were detected"));
         assert!(report.contains("demo_wallet_1"));
+    }
+
+    #[test]
+    fn trace_step_records_effective_arguments_and_result_counts() {
+        let result = json!({
+            "status": "success",
+            "cycles": [
+                {"path_wallets": ["A", "B", "C", "A"]},
+                {"path_wallets": ["X", "Y", "Z", "X"]}
+            ]
+        });
+
+        let step = trace_step(
+            1,
+            "trace_wallet",
+            r#"{"address":"A","data_source":"demo"}"#,
+            DataSource::Real,
+            &result,
+        );
+
+        assert_eq!(step.round, 1);
+        assert_eq!(step.tool, "trace_wallet");
+        assert_eq!(step.arguments.address, "A");
+        // The investigation's source is enforced regardless of model input.
+        assert_eq!(step.arguments.data_source, "real");
+        assert_eq!(step.status, "success");
+        assert_eq!(step.result_summary["cycles_count"], 2);
+    }
+
+    #[test]
+    fn trace_step_preserves_tool_errors() {
+        let result = json!({
+            "status": "error",
+            "error": "MCP tool execution failed."
+        });
+
+        let step = trace_step(
+            0,
+            "find_related_cases",
+            "not-json",
+            DataSource::Synthetic,
+            &result,
+        );
+
+        assert_eq!(step.arguments.address, "");
+        assert_eq!(step.arguments.data_source, "demo");
+        assert_eq!(step.status, "error");
+        assert_eq!(step.result_summary["error"], "MCP tool execution failed.");
     }
 }

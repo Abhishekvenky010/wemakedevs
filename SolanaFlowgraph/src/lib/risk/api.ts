@@ -34,11 +34,36 @@ export interface GraphEvidence {
   path_wallets: string[];
 }
 
+export interface TransactionEdge {
+  source: string;
+  destination: string;
+  direction: 'incoming' | 'outgoing' | 'internal';
+  signature: string;
+  amount: number;
+  mint: string;
+  slot: number | null;
+  block_time: number | null;
+  transfer_type: string;
+  success: boolean;
+}
+
+export interface InvestigationTraceStep {
+  round: number;
+  tool: string;
+  arguments: {
+    address: string;
+    data_source: string;
+  };
+  status: string;
+  result_summary: Record<string, unknown>;
+}
+
 export interface RiskReport {
   status: string;
   address: string;
   data_source: string;
   graph_evidence: GraphEvidence[];
+  transaction_graph: TransactionEdge[];
   investigation_diff: {
     current_unique_cycles: number;
     historical_unique_cycles: number;
@@ -54,6 +79,7 @@ export interface RiskReport {
     recommended_actions: string[];
     limitations: string[];
   };
+  investigation_trace: InvestigationTraceStep[];
   ai_risk_report: string;
   wallets_flagged: number;
   cycle_participant_count: number;
@@ -174,7 +200,9 @@ export function generateRiskReport(
       body.address !== address ||
       body.data_source !== expectedDataSource ||
       !Array.isArray(body.graph_evidence) ||
+      !Array.isArray(body.transaction_graph) ||
       !isRecord(body.structured_report) ||
+      !Array.isArray(body.investigation_trace) ||
       typeof body.ai_risk_report !== 'string' ||
       typeof body.action_taken !== 'string' ||
       typeof body.evidence_summary !== 'string' ||

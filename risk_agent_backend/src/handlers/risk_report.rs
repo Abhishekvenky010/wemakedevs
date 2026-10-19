@@ -9,8 +9,8 @@ use crate::agent::orchestrator::run_groq_agent;
 use crate::error::api_error;
 use crate::graph::comparison::compare_paths;
 use crate::graph::investigations::{
-    create_or_update_investigation_case, evaluate_action_rule, evidence_summary,
-    InvestigationAction,
+    InvestigationAction, create_or_update_investigation_case, evaluate_action_rule,
+    evidence_summary,
 };
 use crate::graph::provenance::{DataSource, PROP_DATA_SOURCE};
 use crate::state::AppState;
@@ -249,24 +249,62 @@ pub async fn generate_risk_report(
         .and_then(serde_json::Value::as_str)
         .unwrap_or("uncertain_incomplete_history");
 
-    let structured_report = serde_json::json!({
-        "summary": if cycles.is_empty() {
+    // Load the persisted transfer edges themselves. These are shown in the UI
+    // graph even when they do not form a cycle. A failure here must not turn a
+    // successful report into an error; the cycle evidence remains authoritative.
+    // Mirror the depth actually reached by ingestion so the graph stays scoped
+    // to the evidence that was collected for this investigation.
+    let graph_depth = payload
+        .ingestion
+        .as_ref()
+        .map(|ingestion| ingestion.max_depth_reached)
+        .unwrap_or(2);
+    let transaction_graph = match crate::graph::wallet::fetch_wallet_transfers(
+        &state.falkor_client,
+        address,
+        data_source,
+        graph_depth,
+    )
+    .await
+    {
+        Ok(transfers) => transfers,
+        Err(error) => {
+            eprintln!("Failed to load persisted wallet transfer graph: {error}");
+            Vec::new()
+        }
+    };
+    let transaction_count = transaction_graph.len();
+
+    let summary = if cycles.is_empty() {
+        if transaction_count > 0 {
             if coverage_incomplete {
-                "No circular-transfer paths were detected in the available graph evidence, but transaction coverage was incomplete."
+                format!(
+                    "No circular-transfer paths were detected among {transaction_count} persisted transfer edge(s), but transaction coverage was incomplete."
+                )
             } else {
-                "No circular-transfer paths were detected in the available graph evidence."
+                format!(
+                    "No circular-transfer paths were detected among {transaction_count} persisted transfer edge(s)."
+                )
             }
+        } else if coverage_incomplete {
+            "No circular-transfer paths were detected in the available graph evidence, but transaction coverage was incomplete.".to_string()
         } else {
-            if coverage_incomplete {
-                "Circular-transfer paths were detected in incomplete evidence; this is a risk signal, not proof of wrongdoing."
-            } else {
-                "Circular-transfer paths were detected; this is a risk signal, not proof of wrongdoing."
-            }
-        },
+            "No circular-transfer paths were detected in the available graph evidence.".to_string()
+        }
+    } else if coverage_incomplete {
+        "Circular-transfer paths were detected in incomplete evidence; this is a risk signal, not proof of wrongdoing.".to_string()
+    } else {
+        "Circular-transfer paths were detected; this is a risk signal, not proof of wrongdoing."
+            .to_string()
+    };
+
+    let structured_report = serde_json::json!({
+        "summary": summary,
         "observations": {
             "current_unique_cycles": comparison["current_unique_cycles"],
             "historical_unique_cycles": comparison["historical_unique_cycles"],
-            "recurring_cycles": comparison["recurring_cycles"]
+            "recurring_cycles": comparison["recurring_cycles"],
+            "persisted_transfer_edges": transaction_count
         },
         "novelty_status": novelty_status,
         "limitations": comparison["limitations"],
@@ -278,15 +316,18 @@ pub async fn generate_risk_report(
     });
 
     // Let Groq choose and execute approved read-only graph tools.
-    let mut report = run_groq_agent(
+    let agent_run = run_groq_agent(
         &state,
         &cycles,
         &memories,
         &comparison,
         address,
         data_source,
+        transaction_count,
     )
     .await?;
+    let mut report = agent_run.report;
+    let investigation_trace = agent_run.trace;
     if cycles.is_empty() {
         report.push_str(
             "\n\nNo cycle was found in the available graph evidence; this does not establish that the wallet is safe.",
@@ -356,7 +397,9 @@ pub async fn generate_risk_report(
 
     let action_reason = match &action {
         InvestigationAction::FlagForReview => {
-            format!("Circular transfer pattern detected in graph evidence; flagged for human review. {evidence_summary_text}")
+            format!(
+                "Circular transfer pattern detected in graph evidence; flagged for human review. {evidence_summary_text}"
+            )
         }
         InvestigationAction::NoAction => {
             "No qualifying circular transfer pattern found; no action taken.".to_string()
@@ -374,6 +417,7 @@ pub async fn generate_risk_report(
         "data_source": data_source.as_investigation_value(),
         "finding": finding,
         "graph_evidence": cycles,
+        "transaction_graph": transaction_graph,
         "evidence_summary": evidence_summary_text,
         "action_taken": action.as_str(),
         "action_reason": action_reason,
@@ -383,6 +427,7 @@ pub async fn generate_risk_report(
         "wallets_flagged": cycle_participant_count,
         "investigation_diff": comparison,
         "structured_report": structured_report,
+        "investigation_trace": investigation_trace,
         "ai_risk_report": report,
         "coverage": payload.ingestion.as_ref().map(|ingestion| serde_json::json!({
             "incomplete": coverage_incomplete,

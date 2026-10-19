@@ -57,8 +57,8 @@ impl DataSource {
     /// (no `source`, or an unrecognized value) are excluded from both.
     pub fn edge_filter(&self) -> &'static str {
         match self {
-            DataSource::Real => "r.source = 'real' AND r.demo_id IS NULL",
-            DataSource::Synthetic => "r.source = 'demo' OR r.demo_id IS NOT NULL",
+            DataSource::Real => "(r.source = 'real' AND r.demo_id IS NULL)",
+            DataSource::Synthetic => "(r.source = 'demo' OR r.demo_id IS NOT NULL)",
         }
     }
 }
@@ -113,11 +113,11 @@ mod tests {
     fn edge_filters_exclude_unknown_provenance() {
         assert_eq!(
             DataSource::Real.edge_filter(),
-            "r.source = 'real' AND r.demo_id IS NULL"
+            "(r.source = 'real' AND r.demo_id IS NULL)"
         );
         assert_eq!(
             DataSource::Synthetic.edge_filter(),
-            "r.source = 'demo' OR r.demo_id IS NOT NULL"
+            "(r.source = 'demo' OR r.demo_id IS NOT NULL)"
         );
     }
 
