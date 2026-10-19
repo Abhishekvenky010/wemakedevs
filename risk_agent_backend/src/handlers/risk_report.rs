@@ -8,6 +8,10 @@ use std::sync::Arc;
 use crate::agent::orchestrator::run_groq_agent;
 use crate::error::api_error;
 use crate::graph::comparison::compare_paths;
+use crate::graph::investigations::{
+    create_or_update_investigation_case, evaluate_action_rule, evidence_summary,
+    InvestigationAction,
+};
 use crate::graph::provenance::{DataSource, PROP_DATA_SOURCE};
 use crate::state::AppState;
 use serde::Serialize;
@@ -294,6 +298,35 @@ pub async fn generate_risk_report(
         );
     }
 
+    // Deterministic action rule: any detected circular-transfer path in the
+    // requested data source triggers a flag-for-review action. The LLM never
+    // decides whether to act — this is pure Rust logic on actual graph evidence.
+    let action = evaluate_action_rule(&cycles);
+    let evidence_summary_text = evidence_summary(&cycles);
+
+    // Persist or update an investigation case when the action rule is satisfied.
+    // When no qualifying pattern exists, no case is created or updated.
+    let case_result: Option<Value> = if action == InvestigationAction::FlagForReview {
+        match create_or_update_investigation_case(
+            &state.falkor_client,
+            address,
+            data_source,
+            &action,
+            &cycles,
+            &report,
+        )
+        .await
+        {
+            Ok(result) => Some(result),
+            Err(e) => {
+                eprintln!("Failed to persist investigation case: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut participant_set: HashSet<String> = HashSet::new();
     for cycle in &cycles {
         if let Some(path) = cycle.get("path_wallets").and_then(Value::as_array) {
@@ -304,80 +337,50 @@ pub async fn generate_risk_report(
     }
     let cycle_participant_count = participant_set.len();
 
-    let finding = if cycle_participant_count > 0 {
-        if coverage_incomplete {
-            "Circular-transfer pattern detected in incomplete evidence"
-        } else {
-            "Circular-transfer pattern detected"
+    let finding = match &action {
+        InvestigationAction::FlagForReview => {
+            if coverage_incomplete {
+                "Circular transfer pattern detected in incomplete evidence"
+            } else {
+                "Circular transfer pattern detected"
+            }
         }
-    } else if coverage_incomplete {
-        "No cycle detected in incomplete available evidence"
-    } else {
-        "No circular-transfer pattern detected"
+        InvestigationAction::NoAction => {
+            if coverage_incomplete {
+                "No cycle detected in incomplete available evidence"
+            } else {
+                "No circular-transfer pattern detected"
+            }
+        }
     };
 
-    let graph_evidence_json = serde_json::to_string(&cycles).map_err(api_error)?;
+    let action_reason = match &action {
+        InvestigationAction::FlagForReview => {
+            format!("Circular transfer pattern detected in graph evidence; flagged for human review. {evidence_summary_text}")
+        }
+        InvestigationAction::NoAction => {
+            "No qualifying circular transfer pattern found; no action taken.".to_string()
+        }
+    };
 
-    let mut participant_addresses: Vec<String> = participant_set.into_iter().collect();
-    participant_addresses.sort();
-
-    let save_query = format!(
-        r#"CREATE (i:Investigation {{
-            id: randomUUID(),
-            finding: $finding,
-            report: $report,
-            graph_evidence_json: $graph_evidence_json,
-            created_at: timestamp(),
-            status: 'needs_review',
-            {data_source_prop}: $data_source
-        }})
-        WITH i, $wallets AS addresses
-        UNWIND CASE
-            WHEN size(addresses) = 0 THEN [null]
-            ELSE addresses
-        END AS address
-        OPTIONAL MATCH (w:Wallet {{address: address}})
-        WITH i, collect(w) AS matched_wallets
-        FOREACH (
-            w IN matched_wallets |
-            MERGE (i)-[:INVOLVES]->(w)
-        )
-        RETURN i.id AS id, i.created_at AS created_at"#,
-        data_source_prop = PROP_DATA_SOURCE
-    );
-
-    let mut save_result = graph
-        .query(&save_query)
-        .with_param("finding", finding.to_string())
-        .with_param("report", report.clone())
-        .with_param("graph_evidence_json", graph_evidence_json)
-        .with_param("wallets", participant_addresses)
-        .with_param(
-            "data_source",
-            data_source.as_investigation_value().to_string(),
-        )
-        .execute()
-        .await
-        .map_err(api_error)?;
-
-    let saved_row = save_result
-        .data
-        .try_next()
-        .await
-        .map_err(api_error)?
-        .ok_or_else(|| api_error("Investigation was not returned after saving"))?;
-
-    let investigation_id: String = saved_row.try_get("id").map_err(api_error)?;
-
-    let created_at: i64 = saved_row.try_get("created_at").map_err(api_error)?;
+    let case_id = case_result
+        .as_ref()
+        .and_then(|r| r.get("case_id").and_then(Value::as_str))
+        .map(String::from);
 
     Ok(Json(serde_json::json!({
         "status": "success",
         "address": address,
         "data_source": data_source.as_investigation_value(),
+        "finding": finding,
+        "graph_evidence": cycles,
+        "evidence_summary": evidence_summary_text,
+        "action_taken": action.as_str(),
+        "action_reason": action_reason,
+        "case_id": case_id,
+        "case": case_result,
         "cycle_participant_count": cycle_participant_count,
         "wallets_flagged": cycle_participant_count,
-        "graph_evidence": cycles,
         "investigation_diff": comparison,
         "structured_report": structured_report,
         "ai_risk_report": report,
@@ -388,10 +391,17 @@ pub async fn generate_risk_report(
             "limitations": coverage_limitations,
         })),
         "investigation": {
-            "id": investigation_id,
+            "id": case_id.unwrap_or_default(),
             "finding": finding,
-            "created_at": created_at,
-            "status": "needs_review"
+            "created_at": case_result
+                .as_ref()
+                .and_then(|r| r.get("created_at").and_then(Value::as_i64))
+                .unwrap_or(0),
+            "status": if action == InvestigationAction::FlagForReview {
+                "needs_review"
+            } else {
+                "no_action"
+            }
         }
     })))
 }

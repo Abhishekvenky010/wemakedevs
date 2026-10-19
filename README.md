@@ -37,14 +37,28 @@ Detects circular-transfer paths (potential money laundering or rug-pull indicato
 
 ### Security Triage
 Compares current activity against historical patterns to identify recurring threats, novel anomalies, or gaps in evidence.
-
 ### Actionable Insights
+
 Produces explainable reports that distinguish:
+
 - **Confirmed risks** – Cyclic paths with strong evidence
 - **Potential risks** – New cycles not yet seen historically
 - **Uncertain cases** – Incomplete historical evidence
 - **Safe activities** – No detectable patterns
 
+### Deterministic Action Rule
+
+When `POST /api/generate-risk-report` is called, the backend applies a
+deterministic rule on actual graph evidence (never the LLM):
+
+- If ≥1 circular-transfer path (3–6 hops) exists → `action_taken = "flag_for_review"`.
+  An investigation case is created or updated in FalkorDB with status `needs_review`
+  and a stable `case_id`. Repeated reports for the same address + data source reuse
+  the existing case — no duplicates are created.
+- If no cycle is found → `action_taken = "no_action"`, no case is persisted.
+
+Real and synthetic evidence remain strictly separated — the rule only counts
+paths matching the requested `data_source`.
 ## System Flow
 
 ```
@@ -52,7 +66,9 @@ Produces explainable reports that distinguish:
 2. Trace wallet → detect cycles
 3. Find related cases → historical investigations
 4. Compare paths → recurrence/novelty analysis
-5. Generate actionable report
+5. Deterministic action rule → flag_for_review or no_action
+6. Create/update investigation case when rule is satisfied
+7. Generate explainable report with action outcome
 ```
 
 ## Graph Algorithms
@@ -75,14 +91,16 @@ Compares current and historical paths, computing:
 | `find_related_cases` | Locate historical investigations | Falkor DB |
 
 Both tools are invoked through MCP and their results feed directly into the graph comparison engine.
-
 ## Explainability
 
 All reports include:
+
 - **Cycle Roots** – Identified circular paths with hop counts
 - **Historical Context** – Related cases with findings and confidence scores
 - **Novelty Assessment** – Whether the activity is new or recurring
 - **Limitations** – Clear statements about evidence quality and incompleteness
+- **Action Outcome** – `action_taken` (`flag_for_review` or `no_action`), `action_reason`,
+  `evidence_summary`, and `case_id` when a case was created or updated
 
 ## Usage
 
@@ -185,28 +203,56 @@ The frontend is designed to consume the backend API. Follow these steps:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/run` | Run investigation for a wallet address |
-| POST | `/api/run` | Alternative endpoint for investigation |
-| GET | `/api/report/{id}` | Get investigation report by ID |
+| POST | `/api/ingest-wallet` | Ingest real Solana mainnet transfers for a wallet into FalkorDB |
+| POST | `/api/generate-risk-report` | Generate a risk report with deterministic action outcome |
+| GET | `/api/investigations` | List saved investigations |
+| POST | `/api/trace-wallet` | Trace circular-transfer paths for a wallet |
+| POST | `/api/seed-demo` | Seed a disposable demonstration graph |
 
-**Request Body (GET /api/run)**
+**Request Body (POST /api/generate-risk-report)**
 ```json
 {
-  "address": "0x...",
-  "data_source": "real|demo"
+  "address": "<solana-base58-address>",
+  "data_source": "real|demo",
+  "ingestion": {
+    "max_depth": 0,
+    "max_depth_reached": 0,
+    "wallets_visited": 1,
+    "signatures_fetched": 0,
+    "transactions_fetched": 0,
+    "transactions_processed": 0,
+    "transfers_persisted": 0,
+    "duplicates_skipped": 0,
+    "failed_transactions": 0,
+    "persistence_errors": 0,
+    "rate_limited": false,
+    "incomplete": false
+  }
 }
 ```
 
 **Response**
 ```json
 {
-  "status": "success|error",
-  "wallet": "...",
-  "data_source": "...",
-  "detected_cycles": [...],
-  "cases_found": [...]
+  "status": "success",
+  "address": "...",
+  "data_source": "real",
+  "finding": "Circular transfer pattern detected",
+  "graph_evidence": [...],
+  "evidence_summary": "1 circular transfer path(s) detected involving 3 unique wallet(s).",
+  "action_taken": "flag_for_review",
+  "action_reason": "Circular transfer pattern detected in graph evidence; flagged for human review. ...",
+  "case_id": "<uuid>",
+  "investigation": { "id": "<uuid>", "finding": "...", "status": "needs_review" },
+  "cycle_participant_count": 3,
+  "investigation_diff": { ... },
+  "structured_report": { ... },
+  "ai_risk_report": "...",
+  "coverage": { ... }
 }
 ```
+
+When `action_taken` is `"no_action"`, `case_id` is `null` and no case is persisted.
 
 ### Graph Analysis
 
@@ -224,8 +270,8 @@ cargo test
 
 ### Frontend Tests
 ```bash
-# Depending on your frontend framework
-npm test
+cd SolanaFlowgraph
+npm run test:risk
 ```
 
 ## Development Workflow

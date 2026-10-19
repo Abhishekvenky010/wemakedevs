@@ -42,6 +42,16 @@ function reportResponse() {
     ai_risk_report: 'No cycle was found in the available graph evidence.',
     wallets_flagged: 0,
     cycle_participant_count: 0,
+    finding: 'No circular-transfer pattern detected',
+    evidence_summary: 'No circular transfer paths detected.',
+    action_taken: 'no_action',
+    action_reason: 'No qualifying circular transfer pattern found; no action taken.',
+    case_id: null,
+    investigation: {
+      id: null,
+      finding: 'No circular-transfer pattern detected',
+      status: 'no_action',
+    },
   };
 }
 

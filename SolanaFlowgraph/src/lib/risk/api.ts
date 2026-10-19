@@ -61,6 +61,17 @@ export interface RiskReport {
     incomplete: boolean;
     limitations: string[];
   };
+  // Deterministic action outcome from the backend.
+  finding: string;
+  evidence_summary: string;
+  action_taken: "flag_for_review" | "no_action";
+  action_reason: string;
+  case_id: string | null;
+  investigation: {
+    id: string | null;
+    finding: string;
+    status: "needs_review" | "no_action";
+  };
 }
 
 export class BackendRequestError extends Error {
@@ -164,7 +175,10 @@ export function generateRiskReport(
       body.data_source !== expectedDataSource ||
       !Array.isArray(body.graph_evidence) ||
       !isRecord(body.structured_report) ||
-      typeof body.ai_risk_report !== 'string'
+      typeof body.ai_risk_report !== 'string' ||
+      typeof body.action_taken !== 'string' ||
+      typeof body.evidence_summary !== 'string' ||
+      typeof body.action_reason !== 'string'
     ) {
       throw new Error('Risk report response is missing required report fields');
     }
