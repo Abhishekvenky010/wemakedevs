@@ -188,7 +188,7 @@ wemakedevs/
    ```bash
    cargo run --release
    ```
-   The server will start on `http://localhost:3000`.
+   The server will start on `http://localhost:8080`.
 
 ### Frontend Setup
 
@@ -215,6 +215,33 @@ The frontend is designed to consume the backend API. Follow these steps:
    ```bash
    npm run build
    ```
+
+## Deployment
+
+The frontend and the backend deploy separately.
+
+> The backend is a long-running Rust/Axum process. It cannot run on Vercel, which has no native Rust runtime. Vercel hosts the Next.js frontend; the backend goes on a platform that supports persistent processes (Render, Railway, Fly.io).
+
+### Backend → Render (Docker)
+
+A `render.yaml` blueprint and `risk_agent_backend/Dockerfile` are included.
+
+1. In Render, choose **New → Blueprint** and select this repo. Render reads `render.yaml`.
+2. When prompted, set the secret environment variables:
+   `FALKORDB_URL`, `GROQ_API_KEY`, `HELIUS_API_KEY`, `SOLANA_RPC_URL`.
+3. Deploy. Render builds `risk_agent_backend/Dockerfile` and health-checks `GET /health`.
+
+Manual alternative: create a **Web Service**, set **Root Directory** to `risk_agent_backend`, **Environment** to `Docker`, and **Dockerfile Path** to `risk_agent_backend/Dockerfile`.
+
+The server binds `0.0.0.0:$PORT`; Render injects `PORT` automatically. The backend must be able to reach FalkorDB at startup or it exits.
+
+### Frontend → Vercel
+
+1. Import this repo into Vercel; `vercel.json` targets the `SolanaFlowgraph` Next.js app.
+2. Add the environment variable `NEXT_PUBLIC_RISK_API_URL` = your Render service URL, e.g. `https://agentx-backend.onrender.com`.
+3. Deploy.
+
+Without `NEXT_PUBLIC_RISK_API_URL` the frontend falls back to `http://localhost:8080` and cannot reach the deployed backend.
 
 ## API Endpoints
 

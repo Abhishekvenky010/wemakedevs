@@ -1,10 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "services": {
-    "risk_agent_backend": {
-      "root": "risk_agent_backend",
-      "runtime": "rust"
-    },
     "agentx": {
       "root": "SolanaFlowgraph",
       "framework": "nextjs"
